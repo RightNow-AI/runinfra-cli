@@ -65,6 +65,93 @@ yet. Run the CLI from a checkout instead, see [Development](#development).
 
 ---
 
+## Verifying a release
+
+Every release publishes `SHA256SUMS`, which lists the sha256 of each binary,
+and `SHA256SUMS.sig`, an Ed25519 signature over that file.
+
+`install.sh` checks both for you. It carries the public key **inside the
+script** rather than fetching it, because a key downloaded from the same host
+as the binary proves nothing: whoever can replace one can replace the other and
+serve a matching pair. It verifies the signature before it reads a single hash
+out of `SHA256SUMS`, and a bad signature ends the install rather than printing
+a warning.
+
+A **missing** signature ends the install too, when the artifacts came from a
+release. An attacker who can serve you a swapped binary can also delete the
+signature that would expose it, so a check that disappears on request is not a
+check. If you are deliberately mirroring a release, or installing one published
+before the signing key existed, `RUNINFRA_ALLOW_UNSIGNED=1` skips it and says
+so, and artifacts taken from your own `--base-url` are never held to this rule.
+
+Being unable to **perform** the check is the one case that stays a warning. If
+the host has no `openssl`, or none that can do Ed25519, `install.sh` says so on
+one line, names that exact reason, and continues on the checksum alone.
+Refusing to install on a minimal container would cost more than it buys, and
+the checksum still refuses a bad download. On macOS it looks past the LibreSSL
+at `/usr/bin/openssl`, which cannot do the job, and tries the Homebrew
+`openssl@3` locations before it gives up.
+
+`install.ps1` does not check the signature. Windows PowerShell 5.1 has no
+Ed25519 and .NET only gained one in 8, so it verifies the checksum, prints the
+command below, and tells you which check it skipped rather than letting you
+assume both ran.
+
+To check a release by hand, save this as `runinfra-release.pub`:
+
+```
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAYkEJIc7GfRAHAvUXcY/jrtnwFj53XZNDoXE6cAkOxYk=
+-----END PUBLIC KEY-----
+```
+
+Its fingerprint is sha256 over the raw 32 byte key, and you can derive it from
+the file you just saved rather than taking this line on trust:
+
+```console
+$ openssl pkey -pubin -in runinfra-release.pub -outform DER | tail -c 32 | sha256sum
+5b2c8f637c0cd00a61ec6f126e5a9493c022ef1ea5be70fdd3ef4adf55801532
+```
+
+Then, in the directory holding the downloaded files:
+
+```console
+$ openssl pkeyutl -verify -pubin -inkey runinfra-release.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+Signature Verified Successfully
+
+$ sha256sum --ignore-missing -c SHA256SUMS
+runinfra-linux-x64: OK
+```
+
+Run them in that order. The signature is what makes the checksum worth
+checking: `SHA256SUMS` arrives from the same place as the binary, so anyone who
+can swap the binary can swap its recorded hash to match. Verify the signature
+first, then let the verified `SHA256SUMS` speak for the bytes.
+
+Two things that are a failed check rather than a bad file. If the signature is
+published base64 encoded rather than as 64 raw bytes, decode it first and point
+`-sigfile` at the result, `base64 -d SHA256SUMS.sig > SHA256SUMS.sig.raw`, with
+`-D` instead of `-d` on macOS. And
+`-rawin` needs OpenSSL 1.1.1 or newer: the `openssl` on a stock macOS is
+LibreSSL, whose `pkeyutl` has no `-rawin` at all, so it answers with a usage
+error rather than a verdict. Read that as "not checked", not as "bad", and
+install OpenSSL through Homebrew if you want the real answer.
+
+### What a good signature proves
+
+It proves the RunInfra release pipeline signed that file with the private half
+of the key above, and that nothing has altered it since.
+
+It does **not** prove that pipeline was not subverted. The signing key lives in
+CI, so anyone who could steal the release token or edit the release workflow
+could also reach the key and sign whatever they wanted. What this closes is a
+release asset altered after publication, and a mirror or CDN serving something
+other than what was published. Both are real attacks and both are worth
+closing. Neither is the same thing as the download being tamper proof, and we
+do not claim it is.
+
+---
+
 ## What the CLI never does
 
 - **It never sees your password.** Sign-in happens in your browser, in your

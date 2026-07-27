@@ -8,6 +8,16 @@
 # edits your PATH: if the install directory is not on it, the exact command to
 # add it is printed and the decision stays yours.
 #
+# WHAT THIS SCRIPT DOES NOT CHECK. Releases also publish SHA256SUMS.sig, an
+# Ed25519 signature over SHA256SUMS. This installer does NOT verify it, and
+# says so on screen rather than staying quiet about it. Windows PowerShell 5.1
+# has no Ed25519 primitive, and .NET only gained one in 8, so there is nothing
+# here to verify it with. The honest options were to add a dependency, to fake
+# the check, or to tell you plainly which check ran and which did not. This
+# file does the third: the sha256 comparison is real and still refuses a bad
+# download, and the signature is left to you with the exact command printed.
+# See "Verifying a release" in cli/README.md.
+#
 # OPTIONS. Every option is an environment variable and a parameter. A piped
 # install has nowhere to put a parameter, so use the variables there:
 #
@@ -35,6 +45,7 @@
 #   runinfra-linux-x64-musl      runinfra-darwin-arm64
 #   runinfra-linux-arm64         runinfra-windows-x64.exe
 #   runinfra-linux-arm64-musl    SHA256SUMS
+#                                SHA256SUMS.sig
 #
 # SHA256SUMS is coreutils format: one "<64 lowercase hex>  <artifact>" line per
 # artifact. Windows on Arm is served the x64 build and told so, because Windows
@@ -61,6 +72,12 @@ $ProgressPreference = 'SilentlyContinue'
 $RepoDefault = 'RightNow-AI/runinfra-cli'
 $BinaryName = 'runinfra.exe'
 $SupportedTargets = @('windows-x64')
+
+# Printed, never used to verify anything here, because nothing in Windows
+# PowerShell 5.1 can verify an Ed25519 signature. It is sha256 over the raw 32
+# byte public key, and it lets a reader confirm that the key they fetched to
+# run the check by hand is the same one cli/README.md and cli/install.sh pin.
+$ReleaseKeyFingerprint = '5b2c8f637c0cd00a61ec6f126e5a9493c022ef1ea5be70fdd3ef4adf55801532'
 
 # ------------------------------------------------------------------ output --
 
@@ -370,6 +387,32 @@ function Install-RunInfraCli {
                 'Try again, and if it happens twice do not use the file.'
             )
         }
+
+        # Said out loud, next to the check that did run, so nobody reads
+        # "Verifying checksum" as meaning everything was verified. The Linux
+        # and macOS installer checks the release signature here. This one
+        # cannot: there is no Ed25519 in Windows PowerShell 5.1, .NET only
+        # gained one in 8, and adding a dependency to an installer whose whole
+        # promise is that it needs nothing installed would be the wrong trade.
+        # Skipping it quietly was the other option, and it is the one that
+        # leaves a reader believing something untrue.
+        Write-Plain 'Checksum verified. The release signature was NOT checked: this'
+        Write-Plain 'installer has no Ed25519 available. To check it yourself, with openssl:'
+        Write-Plain ''
+        # curl.exe, not curl. In Windows PowerShell 5.1, which this installer
+        # targets, `curl` is an alias for Invoke-WebRequest, and these flags are
+        # a parse error against it rather than a download. Printing a command
+        # the reader cannot paste is worse than printing none. The .exe suffix
+        # costs nothing on PowerShell 7, where the alias no longer exists.
+        Write-Plain "  curl.exe -fsSLO $sourceBase/SHA256SUMS"
+        Write-Plain "  curl.exe -fsSLO $sourceBase/SHA256SUMS.sig"
+        Write-Plain '  openssl pkeyutl -verify -pubin -inkey runinfra-release.pub -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig'
+        Write-Plain ''
+        Write-Plain "The public key to save as runinfra-release.pub, its fingerprint"
+        Write-Plain "$ReleaseKeyFingerprint,"
+        Write-Plain 'and what a good signature does and does not prove, are all in'
+        Write-Plain 'cli/README.md under "Verifying a release".'
+        Write-Plain ''
 
         # Run the staged copy before it takes the real name. If it cannot run
         # here it will not run once renamed, and an upgrade that swapped a

@@ -6,11 +6,23 @@
 #
 # Installs the standalone `runinfra` binary, which needs no Node and no Python
 # runtime on the host. The binary is verified against the release's SHA256SUMS
-# file before anything is written into place, and the installer never edits a
-# shell profile: if the install directory is not on PATH it prints the line to
-# add and the file to add it to, and leaves that decision to you.
+# file, and SHA256SUMS is itself checked against an Ed25519 signature made by a
+# key pinned inside this script, before anything is written into place.
 #
-# OPTIONS. Every option is an environment variable and a flag. Use the flags
+# That check can be skipped, so it is not promised unconditionally here. It is
+# skipped when the host has no openssl able to do Ed25519, when the artifacts
+# came from a --base-url mirror that serves no signature, when a temporary file
+# for the pinned key cannot be written, and when RUNINFRA_ALLOW_UNSIGNED=1 says
+# to skip it. Every one of those says on its own line that it was skipped and
+# why, and the checksum comparison still runs and still refuses a bad file.
+# What is never skipped: a signature that fails, and a release that serves no
+# signature at all. Both end the install.
+#
+# The installer never edits a shell profile: if the install directory is not on
+# PATH it prints the line to add and the file to add it to, and leaves that
+# decision to you.
+#
+# OPTIONS. Most options are an environment variable and a flag. Use the flags
 # when the script is piped, since a pipe has no place to put an assignment:
 #
 #   curl -fsSL <url> | sh -s -- --version 0.1.1 --install-dir /usr/local/bin
@@ -28,6 +40,12 @@
 #                                          uname. Use it to stage a build for a
 #                                          machine you are not standing on.
 #
+# RUNINFRA_ALLOW_UNSIGNED=1 is the one escape hatch, and it has no flag on
+# purpose: it is not part of a normal install. Set it to install from a release
+# that serves no SHA256SUMS.sig, which is a thing a deliberate mirror operator
+# does and a thing an ordinary user never needs. Without it, a release with no
+# signature ends the install.
+#
 # THE RELEASE LAYOUT THIS EXPECTS. Each release is tagged "v<version>" and
 # carries these files as flat assets, with no directory components in the name:
 #
@@ -35,11 +53,30 @@
 #   runinfra-linux-x64-musl      runinfra-darwin-arm64
 #   runinfra-linux-arm64         runinfra-windows-x64.exe
 #   runinfra-linux-arm64-musl    SHA256SUMS
+#                                SHA256SUMS.sig
 #
 # SHA256SUMS is coreutils format: one "<64 lowercase hex>  <artifact>" line per
 # artifact. If a build is missing from a release, the machine that needs it
 # gets a refusal naming the exact file, which is the correct outcome. Installing
 # a glibc build on a musl host would produce a loader error nobody can read.
+#
+# WHAT THE SIGNATURE PROVES, stated plainly, because a security claim that
+# oversells itself is worse than none at all.
+#
+# SHA256SUMS.sig is an Ed25519 signature over SHA256SUMS. The public half of
+# that key is pinned in this file as a literal and is never downloaded, so the
+# chain a good signature establishes is: this script trusts one key, that key
+# signed this SHA256SUMS, and this SHA256SUMS names the hash of the binary now
+# on disk.
+#
+# It proves the file came out of the RunInfra release pipeline. It does NOT
+# prove the pipeline was not subverted. The signing key is held by CI, so
+# whoever can steal the release token or edit the release workflow can also
+# reach the key. What this defends against is a release asset altered after
+# publication, and a hostile mirror or CDN serving something other than what
+# was published. Those are real attacks and this closes them. It is not the
+# same thing as the download being tamper proof, and this installer does not
+# claim that.
 
 set -eu
 
@@ -58,6 +95,10 @@ SUPPORTED_TARGETS="linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl darwin-
 
 tmp_dir=""
 staged_path=""
+# Which openssl performs the signature check. Resolved for real below, because
+# the one on PATH is not always one that can do the job. Defaulted here so no
+# path can reach it unset.
+openssl_bin="openssl"
 
 # ---------------------------------------------------------------- output ---
 
@@ -108,6 +149,10 @@ Installs the runinfra CLI.
 
 The same values are read from RUNINFRA_VERSION, RUNINFRA_INSTALL_DIR,
 RUNINFRA_REPO, RUNINFRA_BASE_URL and RUNINFRA_TARGET.
+
+RUNINFRA_ALLOW_UNSIGNED=1 installs from a release that serves no
+SHA256SUMS.sig. It has no flag, and without it a missing release signature
+ends the install.
 USAGE
 }
 
@@ -118,6 +163,9 @@ install_dir="${RUNINFRA_INSTALL_DIR:-}"
 release_repo="${RUNINFRA_REPO:-$RELEASE_REPO_DEFAULT}"
 base_url="${RUNINFRA_BASE_URL:-}"
 forced_target="${RUNINFRA_TARGET:-}"
+# Read once, compared against the literal 1 and nothing else. A hatch that
+# opens for "0", "false" or an empty accident is not a deliberate act.
+allow_unsigned="${RUNINFRA_ALLOW_UNSIGNED:-}"
 
 # Flags win over the environment: they are the more recent, more deliberate
 # statement of intent, and on a piped install they are the only one available.
@@ -234,6 +282,26 @@ else
 		fi
 	fi
 
+	# The musl build links against libstdc++ and libgcc, which a bare Alpine
+	# does not carry. Without them the binary installs perfectly and then dies
+	# on first run with a wall of "Error relocating ... symbol not found" and
+	# exit 127, which reads like a corrupt download and is not. Say so now,
+	# while the reader is still looking at this terminal, rather than letting
+	# them discover it later. This is a note, not a refusal: the file may
+	# already be present under a name we did not look for, and being wrong
+	# here must not stop an install that would have worked.
+	if [ "$target_libc" = "-musl" ]; then
+		if ! ls /usr/lib/libstdc++.so.* >/dev/null 2>&1; then
+			say ""
+			say "Note: this looks like a musl system without libstdc++, which the"
+			say "binary needs in order to start. If it fails with \"Error relocating\""
+			say "then install it and run runinfra again:"
+			say ""
+			say "  apk add --no-cache libstdc++"
+			say ""
+		fi
+	fi
+
 	target="${target_os}-${target_arch}${target_libc}"
 	detected_as="$uname_s $uname_m"
 fi
@@ -326,6 +394,237 @@ resolve_latest_tag() {
 	esac
 }
 
+# ------------------------------------------------------ the release signature
+
+# The public half of the release signing key, pinned here as a literal.
+#
+# It is deliberately not downloaded. A key fetched from the same host as the
+# artifact proves nothing, because whoever is in a position to replace one is
+# in a position to replace the other, and would simply serve a matching pair.
+# Pinning it means the only way to change which key this installer trusts is
+# to change this installer.
+#
+# The fingerprint is sha256 over the raw 32 byte public key, which is the last
+# 32 bytes of the SPKI DER above. It is published in cli/README.md so the value
+# below can be compared against a copy that did not arrive with this file.
+RELEASE_KEY_FINGERPRINT="5b2c8f637c0cd00a61ec6f126e5a9493c022ef1ea5be70fdd3ef4adf55801532"
+
+write_release_key() {
+	cat >"$1" <<'RUNINFRA_RELEASE_KEY'
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAYkEJIc7GfRAHAvUXcY/jrtnwFj53XZNDoXE6cAkOxYk=
+-----END PUBLIC KEY-----
+RUNINFRA_RELEASE_KEY
+}
+
+# Can the openssl at $1 actually do Ed25519? Answered with a self contained
+# round trip, not by parsing a version banner: make a throwaway key, sign a few
+# bytes, verify them. It touches no network and costs milliseconds.
+#
+# The probe exists because a non-zero exit from openssl has two opposite
+# meanings and no way to tell them apart from the exit code alone. macOS ships
+# LibreSSL as /usr/bin/openssl, and LibreSSL's pkeyutl has no -rawin, so the
+# real verification would fail there with a usage error rather than a
+# cryptographic one. Treating that as an attack would refuse the install on
+# every stock Mac, which is a self inflicted outage rather than security. Only
+# a failure that happens AFTER this round trip has succeeded is evidence about
+# the file we downloaded.
+openssl_can_verify_ed25519() {
+	probe_openssl="$1"
+	probe_dir="${tmp_dir}/sigprobe"
+	# Each candidate is judged on what it writes itself, never on a file the
+	# previous candidate left behind.
+	rm -rf "$probe_dir" >/dev/null 2>&1 || true
+	mkdir -p "$probe_dir" || return 1
+	printf 'runinfra' >"${probe_dir}/msg" || return 1
+	"$probe_openssl" genpkey -algorithm ed25519 -out "${probe_dir}/probe.pem" >/dev/null 2>&1 || return 1
+	"$probe_openssl" pkey -in "${probe_dir}/probe.pem" -pubout -out "${probe_dir}/probe.pub" >/dev/null 2>&1 || return 1
+	"$probe_openssl" pkeyutl -sign -inkey "${probe_dir}/probe.pem" -rawin \
+		-in "${probe_dir}/msg" -out "${probe_dir}/msg.sig" >/dev/null 2>&1 || return 1
+	"$probe_openssl" pkeyutl -verify -pubin -inkey "${probe_dir}/probe.pub" -rawin \
+		-in "${probe_dir}/msg" -sigfile "${probe_dir}/msg.sig" >/dev/null 2>&1 || return 1
+	# The pinned key has to load in this openssl too, or the real verify would
+	# fail for a reason that has nothing to do with the signature.
+	"$probe_openssl" pkey -pubin -in "$release_key_path" -noout >/dev/null 2>&1 || return 1
+	return 0
+}
+
+# The openssl that can do the job is not always the one on PATH, and on macOS
+# it usually is not: /usr/bin/openssl is LibreSSL, so the probe above fails and
+# the signature would go unchecked on a stock Mac. Homebrew's openssl@3 is a
+# real OpenSSL and is frequently already installed; it is kept off PATH by
+# design so it does not shadow the system one. So look where it actually lives,
+# and run the SAME round trip against each candidate rather than assuming a
+# path implies a capability. First one that passes wins.
+#
+# Sets openssl_bin and returns 0, or returns 1 having set openssl_seen to the
+# first candidate that existed, for a message that can name what it tried.
+resolve_openssl_for_ed25519() {
+	openssl_bin=""
+	openssl_seen=""
+
+	for candidate in openssl \
+		/opt/homebrew/opt/openssl@3/bin/openssl \
+		/usr/local/opt/openssl@3/bin/openssl; do
+		have "$candidate" || continue
+		if [ -z "$openssl_seen" ]; then openssl_seen="$candidate"; fi
+		if openssl_can_verify_ed25519 "$candidate"; then
+			openssl_bin="$candidate"
+			return 0
+		fi
+	done
+
+	# Asked last, and only when it is needed, because it shells out to brew.
+	# The two paths above are where brew puts openssl@3 on Apple silicon and on
+	# Intel, so this only earns its keep on a non-default prefix.
+	if have brew; then
+		brew_prefix="$( (brew --prefix openssl@3) 2>/dev/null || true)"
+		if [ -n "$brew_prefix" ] && have "${brew_prefix}/bin/openssl"; then
+			if [ -z "$openssl_seen" ]; then openssl_seen="${brew_prefix}/bin/openssl"; fi
+			if openssl_can_verify_ed25519 "${brew_prefix}/bin/openssl"; then
+				openssl_bin="${brew_prefix}/bin/openssl"
+				return 0
+			fi
+		fi
+	fi
+
+	return 1
+}
+
+# $1 the signature as downloaded, $2 where to leave exactly 64 raw bytes.
+#
+# An Ed25519 signature is 64 bytes. Releases publish it either as those raw
+# bytes or as their base64 text, and both are accepted here rather than
+# hardcoding one: guessing wrong would turn every honest release into a hard
+# refusal. Whatever arrives is normalised to raw bytes before it reaches
+# openssl, and anything that is neither shape is reported as malformed. If the
+# release job ever adopts a third encoding, this function is the one place
+# that has to learn about it.
+normalize_signature() {
+	sig_bytes="$(wc -c <"$1" 2>/dev/null | tr -d '\000-\040')"
+	case "$sig_bytes" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+
+	if [ "$sig_bytes" -eq 64 ]; then
+		cat "$1" >"$2" || return 1
+		return 0
+	fi
+
+	# base64 of 64 bytes is 88 characters, plus whatever line wrapping and
+	# trailing newline the writer chose. Every byte at or below 0x20 goes
+	# first, so a wrapped file, a single line file and a CRLF file all decode
+	# identically. Raw signature bytes are never fed through this path, so
+	# stripping them cannot corrupt a signature that was already raw.
+	tr -d '\000-\040' <"$1" >"${2}.b64" 2>/dev/null || return 1
+	"$openssl_bin" base64 -d -A -in "${2}.b64" -out "$2" >/dev/null 2>&1 || return 1
+
+	sig_bytes="$(wc -c <"$2" 2>/dev/null | tr -d '\000-\040')"
+	[ "$sig_bytes" = 64 ] || return 1
+	return 0
+}
+
+# $1 the SHA256SUMS file to authenticate. Called BEFORE SHA256SUMS is trusted
+# to say anything about the binary, because that is the order the chain runs
+# in: the signature authenticates the manifest, the manifest authenticates the
+# bytes.
+#
+# A bad signature is an attack and ends the install. So is an absent one, when
+# the artifacts came from a release: see the refusal below for why those are
+# the same finding and not two different ones.
+#
+# Being unable to PERFORM the check is a genuinely different case and is not
+# treated as an attack: the sha256 comparison still runs, and refusing to
+# install on a minimal container with no usable openssl would cost more than it
+# buys. Every path that skips the check says so on one line and names exactly
+# what was skipped.
+verify_release_signature() {
+	sums_file="$1"
+	sig_file="${tmp_dir}/SHA256SUMS.sig"
+
+	if ! download "${source_base}/SHA256SUMS.sig" "$sig_file" quiet; then
+		# On a real release this is fatal. An attacker who can serve a swapped
+		# binary can also delete the signature that would expose it, so
+		# accepting the absence would hand away the whole defence to whoever
+		# asks for it: the check this file documents would be worth exactly
+		# nothing against the attacker it is aimed at. A missing signature and
+		# a wrong one are the same event with a different verb, so they get the
+		# same answer.
+		#
+		# A --base-url mirror is the case this does not apply to, because the
+		# person who typed that URL chose the source deliberately and a mirror
+		# carrying only the binaries is an ordinary thing.
+		if [ "$source_is_release" = yes ] && [ "$allow_unsigned" != 1 ]; then
+			die "SHA256SUMS.sig could not be downloaded from ${source_label}. Nothing has been installed." \
+				"Every RunInfra release publishes an Ed25519 signature over SHA256SUMS," \
+				"so a release without one is a refusal here, not a note." \
+				"" \
+				"A dropped connection looks the same from here as a deleted file, so try" \
+				"again before reading anything into it. If it keeps happening, take it" \
+				"seriously: whoever can serve you a swapped binary can also remove the" \
+				"signature that would have exposed it. A check that goes away on request" \
+				"is not a check, which is why this one does not." \
+				"" \
+				"If you are mirroring this release yourself, or installing one published" \
+				"before the signing key existed, skip it deliberately:" \
+				"" \
+				"  curl -fsSL <url> | RUNINFRA_ALLOW_UNSIGNED=1 sh" \
+				"" \
+				"Otherwise do not run these bytes. Report it at https://github.com/${release_repo}/issues"
+		fi
+		if [ "$source_is_release" = yes ]; then
+			say "Note: SHA256SUMS.sig could not be downloaded and RUNINFRA_ALLOW_UNSIGNED=1 is set, so the release signature was NOT checked. The sha256 checksum still runs."
+		else
+			say "Note: SHA256SUMS.sig could not be downloaded from this source, so the release signature was NOT checked. The sha256 checksum still runs."
+		fi
+		return 0
+	fi
+
+	release_key_path="${tmp_dir}/runinfra-release-key.pem"
+	if ! write_release_key "$release_key_path"; then
+		say "Note: the pinned public key could not be written to a temporary file, so the release signature was NOT checked. The sha256 checksum still runs."
+		return 0
+	fi
+
+	if ! resolve_openssl_for_ed25519; then
+		if [ -z "$openssl_seen" ]; then
+			say "Note: openssl is not installed, so the release signature was NOT checked. The sha256 checksum still runs."
+		else
+			say "Note: no openssl here can verify Ed25519 (${openssl_seen} is $("$openssl_seen" version 2>/dev/null || echo unknown)), so the release signature was NOT checked. The sha256 checksum still runs. On macOS, brew install openssl@3 provides one that can."
+		fi
+		return 0
+	fi
+
+	say "Verifying signature"
+
+	sig_raw="${tmp_dir}/SHA256SUMS.sig.raw"
+	if ! normalize_signature "$sig_file" "$sig_raw"; then
+		die "SHA256SUMS.sig is not an Ed25519 signature. Nothing has been installed." \
+			"It is neither 64 raw bytes nor the base64 form of them." \
+			"A signature file that is not a signature is not a formatting quirk," \
+			"it means the published file was replaced. Do not use this download."
+	fi
+
+	# openssl exits non-zero here only after the round trip above proved this
+	# openssl can perform exactly this operation, so there is one explanation
+	# left: these bytes were not signed by the pinned key.
+	if ! "$openssl_bin" pkeyutl -verify -pubin -inkey "$release_key_path" \
+		-rawin -in "$sums_file" -sigfile "$sig_raw" >/dev/null 2>&1; then
+		die "SIGNATURE VERIFICATION FAILED on SHA256SUMS. Nothing has been installed." \
+			"SHA256SUMS was not signed by the RunInfra release key" \
+			"${RELEASE_KEY_FINGERPRINT}" \
+			"which is pinned inside this installer." \
+			"" \
+			"This is not a damaged download. A damaged file fails the checksum," \
+			"it does not carry a signature that verifies against the wrong key." \
+			"Someone has changed what ${source_label} is serving, or something" \
+			"between you and it is rewriting the response." \
+			"Do not run these bytes. Report it at https://github.com/${release_repo}/issues"
+	fi
+
+	say "Signature verified. SHA256SUMS was signed by release key ${RELEASE_KEY_FINGERPRINT}"
+}
+
 # ------------------------------------------------------------- where from ---
 
 if [ -n "$base_url" ]; then
@@ -343,6 +642,11 @@ if [ -n "$base_url" ]; then
 	source_base="${base_url%/}"
 	source_label="$source_base"
 	release_tag=""
+	# The user named this source themselves. Whatever it does or does not carry
+	# is their arrangement, so a missing signature here is a note rather than a
+	# refusal. Everything below builds its own URL and is held to the stricter
+	# rule.
+	source_is_release=no
 else
 	if [ -n "$version_req" ]; then
 		# "0.1.1" becomes the v form, which is how releases are tagged.
@@ -372,6 +676,7 @@ else
 	fi
 	source_base="https://github.com/${release_repo}/releases/download/${release_tag}"
 	source_label="${release_repo} ${release_tag}"
+	source_is_release=yes
 fi
 
 # ------------------------------------------------------------------ the plan
@@ -435,6 +740,13 @@ say "Downloading SHA256SUMS"
 download "${source_base}/SHA256SUMS" "${tmp_dir}/SHA256SUMS" quiet || die \
 	"could not download SHA256SUMS from ${source_base}/SHA256SUMS" \
 	"Without it the binary cannot be verified, so nothing has been installed."
+
+# Authenticate the manifest before reading a single hash out of it. Nothing
+# below this line is trustworthy on its own: SHA256SUMS arrives from the same
+# place as the binary, so an attacker able to swap the binary can swap its
+# recorded hash to match. The signature is what makes the checksum mean
+# something, which is why it is checked first.
+verify_release_signature "${tmp_dir}/SHA256SUMS"
 
 # GNU writes "<hash>  <name>", and in binary mode "<hash> *<name>". Match both,
 # and match only the exact artifact name so that "runinfra-linux-x64" can never
