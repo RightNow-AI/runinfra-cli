@@ -1,0 +1,48 @@
+RunInfra CLI License
+
+Copyright (c) 2026 RightNow AI. All rights reserved.
+
+1. LICENSE GRANT
+
+RightNow AI grants you a non-exclusive, non-transferable, revocable license
+to install and use this software ("the CLI") for the purpose of accessing
+the RunInfra service and downloading model packages your workspace is
+entitled to.
+
+2. RESTRICTIONS
+
+You may not redistribute, sell, sublicense or publish the CLI or any part of
+it. You may not modify the CLI and distribute the result. You may not remove
+or alter this notice.
+
+These restrictions apply to the CLI itself. They do NOT apply to the model
+packages the CLI downloads: each package carries its own license, stated on
+its product page and included in its kit, and that license governs your use
+of that package.
+
+3. NO WARRANTY
+
+THE CLI IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+The CLI writes large files to disk and transfers large amounts of data over
+your network. You are responsible for available disk space, for any metered
+bandwidth costs your provider charges, and for where you choose to store
+downloaded packages.
+
+4. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL RIGHTNOW AI BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE CLI OR THE USE OR OTHER DEALINGS IN THE CLI.
+
+5. TERMINATION
+
+This license ends if you breach it, or when your entitlement to the RunInfra
+service ends. On termination, stop using the CLI and delete it. Packages you
+have already lawfully downloaded remain governed by their own licenses.
+
+6. CONTACT
+
+https://runinfra.ai
