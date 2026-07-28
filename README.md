@@ -23,28 +23,30 @@ Replace `<slug>` with the slug shown on your package's page under
      before fetching its artifact and installing from it: the Status column
      is the only thing standing between a reader and a command that 404s. -->
 
-Run the npm line above if the machine already has Node 20 or newer. It is the
-only channel published today.
+Three ways in, all live. These kits get pulled onto GPU hosts, and a GPU host
+often has Python but no Node, so pick whichever matches the machine you are
+standing on:
 
-Two more channels are on the way, because these kits get pulled onto GPU hosts
-and a GPU host often has Python but no Node:
+| Channel | Command | Reach for it when |
+| --- | --- | --- |
+| Standalone | `curl -fsSL https://raw.githubusercontent.com/RightNow-AI/runinfra-cli/main/install.sh \| sh` | The box is bare. No Node, no Python, the download brings its own runtime. |
+| Python | `pip install runinfra-cli` | The machine already lives in Python. |
+| Node | `npm install -g @runinfra/cli` | The machine already lives in Node 20 or newer. |
 
-| Channel | Command | Reach for it when | Status |
-| --- | --- | --- | --- |
-| Standalone | `curl -fsSL https://raw.githubusercontent.com/RightNow-AI/runinfra-cli/main/install.sh \| sh` | The box is bare. No Node, no Python, the download brings its own runtime. | Not published yet |
-| Python | `pip install runinfra-cli` | The machine already lives in Python. | Not published yet |
-| Node | `npm install -g @runinfra/cli` | The machine already lives in Node 20 or newer. | **Live, 0.1.1** |
+On Windows the standalone line is
+`irm https://raw.githubusercontent.com/RightNow-AI/runinfra-cli/main/install.ps1 | iex`.
 
-Only the npm row works right now. Checked on 2026-07-27:
-`pip index versions runinfra-cli` answers "No matching distribution found",
-and the installer URL returns 404 because the script is not on the release
-repository's main branch yet. Both are written down with their real commands
-rather than left out, so the release that publishes them only has to flip a
-Status cell, and so a reader can tell today what works from what does not.
+This table deliberately carries **no version and no status column**. It used to
+carry both, and both rotted: after the release that took every channel live, a
+reader on npm was still being told that two of the three did not exist and that
+the client was two versions behind. A number written into prose is a number
+nobody updates. For what is actually published right now, ask the registries:
+`npm view @runinfra/cli version` and `pip index versions runinfra-cli`.
 
-All three publish at the same version, **0.1.1**, and put the same `runinfra`
-command on PATH: the two new channels repackage the client that is already on
-npm rather than changing it. So `runinfra --version` reads the same however it
+All three channels publish the same version at the same time and put the same
+`runinfra` command on PATH: the standalone and Python channels repackage the
+client that is already on npm rather than changing it. So `runinfra --version`
+reads the same however it
 arrived, and every command in this document behaves identically. What differs
 is only what has to be on the machine first:
 
