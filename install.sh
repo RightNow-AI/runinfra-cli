@@ -17,6 +17,9 @@
 # why, and the checksum comparison still runs and still refuses a bad file.
 # What is never skipped: a signature that fails, and a release that serves no
 # signature at all. Both end the install.
+# A remote BusyBox wget download always requires a verified signature, because
+# its redirects cannot be restricted to HTTPS. The skip cases above only apply
+# to HTTPS-enforcing downloaders or an explicitly selected local file mirror.
 #
 # The installer never edits a shell profile: if the install directory is not on
 # PATH it prints the line to add and the file to add it to, and leaves that
@@ -31,9 +34,10 @@
 #                                          Default: the newest release.
 #   RUNINFRA_INSTALL_DIR   --install-dir   Default: $HOME/.local/bin
 #   RUNINFRA_REPO          --repo          owner/name holding the releases.
-#   RUNINFRA_BASE_URL      --base-url      Take the artifacts from this
+#   RUNINFRA_INSTALL_BASE_URL --base-url   Take the artifacts from this
 #                                          directory URL instead of a release.
-#                                          https:// and file:// only. Skips the
+#                                          HTTPS or an explicit file:/// mirror.
+#                                          Skips the
 #                                          version lookup entirely.
 #   RUNINFRA_TARGET        --target        Force the build to fetch, for example
 #                                          "linux-x64". Default: detected from
@@ -54,6 +58,7 @@
 #   runinfra-linux-arm64         runinfra-windows-x64.exe
 #   runinfra-linux-arm64-musl    SHA256SUMS
 #                                SHA256SUMS.sig
+#                                THIRD-PARTY-NOTICES.txt
 #
 # SHA256SUMS is coreutils format: one "<64 lowercase hex>  <artifact>" line per
 # artifact. If a build is missing from a release, the machine that needs it
@@ -88,13 +93,20 @@ if (set -o pipefail 2>/dev/null); then set -o pipefail; fi
 
 RELEASE_REPO_DEFAULT="RightNow-AI/runinfra-cli"
 BINARY_NAME="runinfra"
+NOTICES_NAME="THIRD-PARTY-NOTICES.txt"
 
 # Every build the release publishes. A target that is not on this list is
 # refused before anything is downloaded.
 SUPPORTED_TARGETS="linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl darwin-x64 darwin-arm64"
 
 tmp_dir=""
+download_headers=""
 staged_path=""
+staged_notices_path=""
+notices_backup_path=""
+notices_destination=""
+notices_replaced=no
+keep_notices_backup=no
 # Which openssl performs the signature check. Resolved for real below, because
 # the one on PATH is not always one that can do the job. Defaulted here so no
 # path can reach it unset.
@@ -122,6 +134,25 @@ have() {
 }
 
 cleanup() {
+	if [ -n "$download_headers" ]; then rm -f "$download_headers"; fi
+	# The binary rename is the commit point. Until its staged copy disappears,
+	# restore attribution too, including a notices rename that failed midway.
+	if [ "$notices_replaced" = yes ] && [ -n "$staged_path" ] && [ -e "$staged_path" ]; then
+		if [ -n "$notices_backup_path" ] && { [ -e "$notices_backup_path" ] || [ -L "$notices_backup_path" ]; }; then
+			if ! mv -f "$notices_backup_path" "$notices_destination"; then
+				printf 'runinfra install: could not restore previous notices. They remain at %s\n' "$notices_backup_path" >&2
+				keep_notices_backup=yes
+			fi
+		elif [ -e "$notices_destination" ] || [ -L "$notices_destination" ]; then
+			rm -f "$notices_destination" || printf 'runinfra install: could not remove notices at %s\n' "$notices_destination" >&2
+		fi
+	fi
+	if [ -n "$staged_notices_path" ] && [ -e "$staged_notices_path" ]; then
+		rm -f "$staged_notices_path"
+	fi
+	if [ "$keep_notices_backup" = no ] && [ -n "$notices_backup_path" ] && { [ -e "$notices_backup_path" ] || [ -L "$notices_backup_path" ]; }; then
+		rm -f "$notices_backup_path"
+	fi
 	if [ -n "$tmp_dir" ] && [ -d "$tmp_dir" ]; then
 		rm -rf "$tmp_dir"
 	fi
@@ -143,12 +174,12 @@ Installs the runinfra CLI.
   --version VALUE       Release to install, "0.1.1" or "v0.1.1". Default: newest.
   --install-dir PATH    Where to put the binary. Default: $HOME/.local/bin
   --repo OWNER/NAME     Repository holding the releases.
-  --base-url URL        Directory URL to take the artifacts from, https or file.
+  --base-url URL        HTTPS directory URL or an explicit file:/// mirror.
   --target NAME         Build to fetch, for example linux-x64. Default: detected.
   -h, --help            This text.
 
 The same values are read from RUNINFRA_VERSION, RUNINFRA_INSTALL_DIR,
-RUNINFRA_REPO, RUNINFRA_BASE_URL and RUNINFRA_TARGET.
+RUNINFRA_REPO, RUNINFRA_INSTALL_BASE_URL and RUNINFRA_TARGET.
 
 RUNINFRA_ALLOW_UNSIGNED=1 installs from a release that serves no
 SHA256SUMS.sig. It has no flag, and without it a missing release signature
@@ -161,7 +192,7 @@ USAGE
 version_req="${RUNINFRA_VERSION:-}"
 install_dir="${RUNINFRA_INSTALL_DIR:-}"
 release_repo="${RUNINFRA_REPO:-$RELEASE_REPO_DEFAULT}"
-base_url="${RUNINFRA_BASE_URL:-}"
+base_url="${RUNINFRA_INSTALL_BASE_URL:-}"
 forced_target="${RUNINFRA_TARGET:-}"
 # Read once, compared against the literal 1 and nothing else. A hatch that
 # opens for "0", "false" or an empty accident is not a deliberate act.
@@ -313,13 +344,23 @@ artifact="${BINARY_NAME}-${target}"
 # Everything that could refuse is checked before a single byte is transferred.
 # Discovering there is no way to verify a checksum after pulling down a hundred
 # megabytes would be an insult.
+download_tool=""
 if have curl; then
-	downloader=curl
+	download_tool=curl
 elif have wget; then
-	downloader=wget
-else
-	die "no way to download anything: neither curl nor wget is installed." \
-		"Install one of them and run this again."
+	if wget --no-config --version >/dev/null 2>&1; then
+		download_tool=wget
+	else
+		case "$(wget --help 2>&1 || true)" in
+		*BusyBox*) download_tool=wget-busybox ;;
+		esac
+	fi
+fi
+if [ -z "$download_tool" ]; then
+	case "$base_url" in
+	file:///*) download_tool=local ;;
+	*) die "curl is required unless GNU or BusyBox wget is available." ;;
+	esac
 fi
 
 if have sha256sum; then
@@ -342,56 +383,187 @@ sha256_of() {
 	esac
 }
 
+# Return nothing only when the exact filename is absent. Duplicate, malformed,
+# or hashless entries remain errors rather than becoming optional downloads.
+manifest_checksum() {
+	awk -v want="$1" '
+		{
+			sub(/\r$/, "")
+			listed = 0
+			for (field = 1; field <= NF; field++) {
+				if ($field == want || $field == "*" want) listed = 1
+			}
+			if (listed) {
+				count++
+				hash = $1
+				if (NF != 2 || ($2 != want && $2 != "*" want)) malformed = 1
+			}
+		}
+		END {
+			if (count == 0) exit
+			if (count > 1) print "duplicate"
+			else if (malformed) print "invalid"
+			else print hash
+		}' "$2"
+}
+
 # ------------------------------------------------------------ the transfers
 
 # $1 url, $2 destination, $3 "quiet" or "progress". A hundred megabytes with no
 # progress bar looks like a hang, so the binary gets one and the small files
 # do not.
-download() {
-	case "$downloader" in
-	curl)
-		if [ "$3" = progress ]; then
-			curl --fail --show-error --location \
-				--proto-redir '=https' \
-				--connect-timeout 20 --speed-limit 1024 --speed-time 60 \
-				--progress-bar --output "$2" "$1"
-		else
-			curl --fail --silent --show-error --location \
-				--proto-redir '=https' \
-				--connect-timeout 20 --speed-limit 1024 --speed-time 60 \
-				--output "$2" "$1"
-		fi
-		;;
-	wget)
-		if [ "$3" = progress ]; then
-			wget --output-document "$2" "$1"
-		else
-			wget --quiet --output-document "$2" "$1"
-		fi
-		;;
+require_https_url() {
+	case "$1" in
+	https://*) ;;
+	*) die "Downloads require an HTTPS URL." ;;
+	esac
+	download_authority="${1#https://}"
+	download_authority="${download_authority%%[/?#]*}"
+	case "$download_authority" in
+	"" | *@* | *\\*) die "Downloads require an HTTPS URL without user information." ;;
+	esac
+	case "$1" in
+	*[![:graph:]]*) die "Download URLs must not contain whitespace or control characters." ;;
 	esac
 }
 
-# The newest release, without the API. Asking github.com for /releases/latest
-# answers with a redirect to the tag, which costs no rate limit budget. The
-# API is only used when curl is absent, because wget will not report where it
-# was redirected to.
+# Only the explicitly selected mirror can authorize a local transfer. No
+# response header may switch a remote download to a file or network share.
+local_mirror_path() {
+	case "$1" in file:///*) local_path="${1#file://}" ;; *) return 1 ;; esac
+	case "$local_path" in
+	//* | *'?'* | *'#'* | *'\\'*) return 1 ;;
+	esac
+	# Match control bytes, not locale-dependent printable characters. Local
+	# filename bytes, including UTF-8 under LC_ALL=C, must survive unchanged.
+	[ "$local_path" = "$(printf '%s' "$local_path" | LC_ALL=C tr -d '\001-\037\177')" ] || return 1
+	# Decode URI bytes without interpreting escapes as shell source.
+	local_encoded="$local_path"
+	local_path=""
+	while [ -n "$local_encoded" ]; do
+		case "$local_encoded" in
+		%*)
+			local_hex=$(printf '%.2s' "${local_encoded#%}")
+			case "$local_hex" in [0-9A-Fa-f][0-9A-Fa-f]) ;; *) return 1 ;; esac
+			case "$local_hex" in 0? | 1? | 7[fF] | 5[cC]) return 1 ;; esac
+			local_oct=$(printf '%03o' "0x$local_hex")
+			local_path="$local_path$(printf "\\$local_oct")"
+			local_encoded="${local_encoded#???}"
+			;;
+		*)
+			local_char="${local_encoded%"${local_encoded#?}"}"
+			local_path="$local_path$local_char"
+			local_encoded="${local_encoded#?}"
+			;;
+		esac
+	done
+	case "$local_path" in //*) return 1 ;; esac
+}
+
+# GNU Wget's https-only option applies to recursive links. max-redirect=0
+# refuses before requesting the next URL, so this loop validates every hop.
+# https://raw.githubusercontent.com/mirror/wget/master/doc/wget.texi
+# https://raw.githubusercontent.com/mirror/wget/master/src/retr.c
+# BusyBox lacks those controls and keeps its native redirects. Remote downloads
+# therefore require a verified release signature before their bytes are used.
+wget_https() {
+	wget_url="$1"
+	wget_destination="$2"
+	wget_redirects=0
+	download_headers=$(mktemp "${TMPDIR:-/tmp}/runinfra-headers.XXXXXX") || return 1
+	while :; do
+		require_https_url "$wget_url"
+		wget_status=0
+		if [ "$download_tool" = wget-busybox ]; then
+			wget -S -T 60 -O "$wget_destination" "$wget_url" 2>"$download_headers" || wget_status=$?
+		else
+			wget --no-config --server-response --max-redirect=0 --https-only \
+				--timeout=60 --tries=1 --output-document="$wget_destination" "$wget_url" 2>"$download_headers" || wget_status=$?
+		fi
+		wget_code=$(awk '/^  HTTP\/[0-9.]+ [0-9][0-9][0-9]/ { code=$2 } END { print code }' "$download_headers")
+		case "$wget_code" in
+		301 | 302 | 303 | 307 | 308)
+			[ "$wget_redirects" -lt 5 ] || break
+			wget_location=$(awk '/^  HTTP\// { location="" } /^[ \t]+[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:/ { sub(/^[ \t]+[^:]+:[ \t]*/, ""); sub(/\r$/, ""); sub(/ \[following\]$/, ""); location=$0 } END { print location }' "$download_headers")
+			[ -n "$wget_location" ] || break
+			wget_origin="${wget_url#https://}"
+			wget_origin="https://${wget_origin%%[/?#]*}"
+			case "$wget_location" in
+			https://*) wget_url="$wget_location" ;;
+			//*) wget_url="https:$wget_location" ;;
+			/*) wget_url="$wget_origin$wget_location" ;;
+			\?*) wget_url="${wget_url%%[?#]*}$wget_location" ;;
+			\#*) wget_url="${wget_url%%#*}$wget_location" ;;
+			*:*) break ;;
+			*) wget_url="${wget_url%%[?#]*}"; wget_url="${wget_url%/*}/$wget_location" ;;
+			esac
+			wget_redirects=$((wget_redirects + 1))
+			;;
+		200)
+			if [ "$wget_status" -eq 0 ]; then
+				rm -f "$download_headers"; download_headers=""
+				wget_final_url="$wget_url"
+				return 0
+			fi
+			break ;;
+		*) break ;;
+		esac
+	done
+	rm -f "$download_headers"; download_headers=""
+	if [ "$wget_destination" != /dev/null ]; then rm -f "$wget_destination"; fi
+	case "$wget_code" in 404 | 410) return 22 ;; esac
+	return 1
+}
+
+download() {
+	case "$1" in
+	file:///*)
+		[ -n "$base_url" ] && [ "${1%/*}" = "${base_url%/}" ] && local_mirror_path "$1" || die "Downloads require HTTPS or an explicit local file mirror."
+		[ -e "$local_path" ] || return 22
+		if cp "$local_path" "$2" 2>/dev/null; then return 0; fi
+		rm -f "$2"
+		return 1 ;;
+	esac
+	require_https_url "$1"
+	case "$download_tool" in wget | wget-busybox) wget_https "$1" "$2"; return $? ;; esac
+	if [ "$3" = progress ]; then download_display=--progress-bar; else download_display=--silent; fi
+	# --disable must be first: a user's curlrc must not enable insecure TLS or
+	# add output files. Restrict both the initial URL and every redirect.
+	if curl --disable --fail --show-error --location \
+		--proto '=https' --proto-redir '=https' --max-redirs 5 \
+		--connect-timeout 20 --max-time 600 --speed-limit 1024 --speed-time 60 \
+		"$download_display" --output "$2" "$1"; then
+		return 0
+	else
+		download_status=$?
+		rm -f "$2"
+		return "$download_status"
+	fi
+}
+
+# Curl and GNU wget resolve the newest release without the API. Asking
+# github.com for /releases/latest redirects to the tag without a rate limit.
 resolve_latest_tag() {
-	case "$downloader" in
-	curl)
-		latest_url="$(curl --fail --silent --show-error --location \
-			--proto-redir '=https' --connect-timeout 20 --max-time 60 \
-			--output /dev/null --write-out '%{url_effective}' \
-			"https://github.com/${release_repo}/releases/latest")" || return 1
-		printf '%s\n' "${latest_url##*/}"
-		;;
-	wget)
-		latest_json="$(wget --quiet --output-document - \
-			"https://api.github.com/repos/${release_repo}/releases/latest")" || return 1
+	if [ "$download_tool" = wget-busybox ]; then
+		# BusyBox does not report its final URL. Keep the original API lookup.
+		latest_url="https://api.github.com/repos/${release_repo}/releases/latest"
+		require_https_url "$latest_url"
+		latest_json="$(wget -q -T 60 -O - "$latest_url")" || return 1
 		printf '%s' "$latest_json" | tr ',' '\n' |
 			sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
-		;;
-	esac
+		return 0
+	fi
+	if [ "$download_tool" = wget ]; then
+		wget_https "https://github.com/${release_repo}/releases/latest" /dev/null || return 1
+		printf '%s\n' "${wget_final_url##*/}"
+		return 0
+	fi
+	latest_url="$(curl --disable --fail --silent --show-error --location \
+		--proto '=https' --proto-redir '=https' --max-redirs 5 \
+		--connect-timeout 20 --max-time 60 \
+		--output /dev/null --write-out '%{url_effective}' \
+		"https://github.com/${release_repo}/releases/latest")" || return 1
+	printf '%s\n' "${latest_url##*/}"
 }
 
 # ------------------------------------------------------ the release signature
@@ -533,16 +705,27 @@ normalize_signature() {
 # the artifacts came from a release: see the refusal below for why those are
 # the same finding and not two different ones.
 #
-# Being unable to PERFORM the check is a genuinely different case and is not
-# treated as an attack: the sha256 comparison still runs, and refusing to
-# install on a minimal container with no usable openssl would cost more than it
-# buys. Every path that skips the check says so on one line and names exactly
-# what was skipped.
+# Only a downloader that enforces HTTPS at every hop, or an explicit local
+# mirror, may skip authentication. A matching binary and checksum can both be
+# replaced after an unchecked redirect, so every other transport fails closed.
+refuse_unverified_download() {
+	case "$source_base" in file:///*) return 0 ;; esac
+	case "$download_tool" in curl | wget) return 0 ;; esac
+	die "Install curl or openssl to verify this download."
+}
+
 verify_release_signature() {
 	sums_file="$1"
 	sig_file="${tmp_dir}/SHA256SUMS.sig"
 
-	if ! download "${source_base}/SHA256SUMS.sig" "$sig_file" quiet; then
+	if download "${source_base}/SHA256SUMS.sig" "$sig_file" quiet; then
+		:
+	else
+		signature_download_status=$?
+		refuse_unverified_download
+		if [ "$signature_download_status" -ne 22 ]; then
+			die "The release signature download did not complete."
+		fi
 		# On a real release this is fatal. An attacker who can serve a swapped
 		# binary can also delete the signature that would expose it, so
 		# accepting the absence would hand away the whole defence to whoever
@@ -582,11 +765,13 @@ verify_release_signature() {
 
 	release_key_path="${tmp_dir}/runinfra-release-key.pem"
 	if ! write_release_key "$release_key_path"; then
+		refuse_unverified_download
 		say "Note: the pinned public key could not be written to a temporary file, so the release signature was NOT checked. The sha256 checksum still runs."
 		return 0
 	fi
 
 	if ! resolve_openssl_for_ed25519; then
+		refuse_unverified_download
 		if [ -z "$openssl_seen" ]; then
 			say "Note: openssl is not installed, so the release signature was NOT checked. The sha256 checksum still runs."
 		else
@@ -599,6 +784,7 @@ verify_release_signature() {
 
 	sig_raw="${tmp_dir}/SHA256SUMS.sig.raw"
 	if ! normalize_signature "$sig_file" "$sig_raw"; then
+		refuse_unverified_download
 		die "SHA256SUMS.sig is not an Ed25519 signature. Nothing has been installed." \
 			"It is neither 64 raw bytes nor the base64 form of them." \
 			"A signature file that is not a signature is not a formatting quirk," \
@@ -610,6 +796,7 @@ verify_release_signature() {
 	# left: these bytes were not signed by the pinned key.
 	if ! "$openssl_bin" pkeyutl -verify -pubin -inkey "$release_key_path" \
 		-rawin -in "$sums_file" -sigfile "$sig_raw" >/dev/null 2>&1; then
+		refuse_unverified_download
 		die "SIGNATURE VERIFICATION FAILED on SHA256SUMS. Nothing has been installed." \
 			"SHA256SUMS was not signed by the RunInfra release key" \
 			"${RELEASE_KEY_FINGERPRINT}" \
@@ -629,15 +816,8 @@ verify_release_signature() {
 
 if [ -n "$base_url" ]; then
 	case "$base_url" in
-	https://* | file://*) ;;
-	http://*)
-		die "refusing an http:// source: $base_url" \
-			"The checksum would arrive over the same unprotected connection as the" \
-			"binary, so anything able to change one can change the other. Use https."
-		;;
-	*)
-		die "--base-url must start with https:// or file://, got: $base_url"
-		;;
+	file:///*) local_mirror_path "$base_url" && [ -d "$local_path" ] || die "Downloads require HTTPS or an existing local file mirror." ;;
+	*) require_https_url "$base_url" ;;
 	esac
 	source_base="${base_url%/}"
 	source_label="$source_base"
@@ -751,8 +931,11 @@ verify_release_signature "${tmp_dir}/SHA256SUMS"
 # GNU writes "<hash>  <name>", and in binary mode "<hash> *<name>". Match both,
 # and match only the exact artifact name so that "runinfra-linux-x64" can never
 # be satisfied by the line for "runinfra-linux-x64-musl".
-expected_sha="$(awk -v want="$artifact" '$2 == want || $2 == "*" want { print $1; exit }' \
-	"${tmp_dir}/SHA256SUMS")"
+expected_sha="$(manifest_checksum "$artifact" "${tmp_dir}/SHA256SUMS")"
+
+if [ "$expected_sha" = duplicate ]; then
+	die "SHA256SUMS contains a duplicate entry for ${artifact}." "Nothing has been installed."
+fi
 
 if [ -z "$expected_sha" ]; then
 	die "SHA256SUMS has no line for ${artifact}." \
@@ -784,6 +967,37 @@ if [ "$actual_sha" != "$expected_sha" ]; then
 		"Try again, and if it happens twice do not use the file."
 fi
 
+# Older releases did not list notices. Once listed, they must be downloaded
+# and verified before the binary is executed or either installed file changes.
+notices_expected_sha="$(manifest_checksum "$NOTICES_NAME" "${tmp_dir}/SHA256SUMS")"
+if [ "$notices_expected_sha" = duplicate ]; then
+	die "SHA256SUMS contains a duplicate entry for ${NOTICES_NAME}." "Nothing has been installed."
+fi
+if [ -n "$notices_expected_sha" ]; then
+	if [ "${#notices_expected_sha}" -ne 64 ]; then
+		die "SHA256SUMS must contain exactly one valid sha256 hash for ${NOTICES_NAME}." "Nothing has been installed."
+	fi
+	case "$notices_expected_sha" in
+	*[!0-9a-fA-F]*)
+		die "SHA256SUMS must contain exactly one valid sha256 hash for ${NOTICES_NAME}." "Nothing has been installed."
+		;;
+	esac
+	staged_notices_path="${install_dir}/.${NOTICES_NAME}.download.$$"
+	say "Downloading ${NOTICES_NAME}"
+	download "${source_base}/${NOTICES_NAME}" "$staged_notices_path" quiet || die \
+		"could not download ${NOTICES_NAME} listed in SHA256SUMS." \
+		"Nothing has been installed. This release is incomplete."
+	notices_actual_sha="$(sha256_of "$staged_notices_path" | tr 'ABCDEF' 'abcdef')"
+	notices_expected_sha="$(printf '%s' "$notices_expected_sha" | tr 'ABCDEF' 'abcdef')"
+	if [ "$notices_actual_sha" != "$notices_expected_sha" ]; then
+		die "checksum mismatch on ${NOTICES_NAME}. Nothing has been installed." \
+			"expected  ${notices_expected_sha}" \
+			"got       ${notices_actual_sha}" \
+			"Try again, and if it happens twice do not use the file."
+	fi
+	chmod 644 "$staged_notices_path" || die "could not make ${NOTICES_NAME} readable."
+fi
+
 chmod 755 "$staged_path" || die "could not make ${artifact} executable."
 
 # Run the staged copy before it takes the real name. If it cannot run here it
@@ -794,16 +1008,42 @@ chmod 755 "$staged_path" || die "could not make ${artifact} executable."
 # reading this script from stdin, so a child that read stdin would eat the
 # rest of the installer.
 if ! installed_version="$("$staged_path" --version 2>&1 </dev/null)"; then
+	case "$installed_version" in
+	*GLIBC_*|*GLIBCXX_*|*built\ for\ macOS*|*requires\ macOS*|*Symbol\ not\ found*|*Error\ relocating*)
+		boot_hint="This system is too old or lacks required runtime libraries. GNU Linux needs glibc 2.25 or newer; macOS needs 13.0 or newer. On Alpine, install libstdc++."
+		;;
+	*Permission\ denied*|*Operation\ not\ permitted*)
+		boot_hint="If ${install_dir} is mounted noexec, install somewhere else: --install-dir \$HOME/bin"
+		;;
+	*)
+		boot_hint="Check that the selected target matches this machine and its OS and runtime requirements."
+		;;
+	esac
 	die "the downloaded binary passed its checksum but will not run here." \
 		"${installed_version}" \
-		"Nothing has been replaced. If ${install_dir} is mounted noexec, install" \
-		"somewhere else: --install-dir \$HOME/bin"
+		"Nothing has been replaced. ${boot_hint}"
+fi
+
+if [ -n "$staged_notices_path" ]; then
+	notices_destination="${install_dir}/${NOTICES_NAME}"
+	if [ -e "$notices_destination" ] || [ -L "$notices_destination" ]; then
+		[ -f "$notices_destination" ] || die "${notices_destination} is not a file." \
+			"Nothing has been replaced. Move it aside and try again."
+		notices_backup_path="${install_dir}/.${NOTICES_NAME}.previous.$$"
+		cp -p -P "$notices_destination" "$notices_backup_path" || die "could not preserve ${notices_destination}." \
+			"Nothing has been replaced."
+	fi
+	notices_replaced=yes
+	mv -f "$staged_notices_path" "$notices_destination" || die "could not put ${NOTICES_NAME} into ${install_dir}." \
+		"The previous binary remains installed."
+	staged_notices_path=""
 fi
 
 mv -f "$staged_path" "$destination" || die \
 	"could not move the new binary into ${destination}." \
 	"Nothing has been replaced."
 staged_path=""
+notices_replaced=no
 
 # ------------------------------------------------------------------- report
 

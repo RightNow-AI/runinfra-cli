@@ -16,7 +16,7 @@
 # the check, or to tell you plainly which check ran and which did not. This
 # file does the third: the sha256 comparison is real and still refuses a bad
 # download, and the signature is left to you with the exact command printed.
-# See "Verifying a release" in cli/README.md.
+# See https://github.com/RightNow-AI/runinfra-cli#verifying-a-release.
 #
 # OPTIONS. Every option is an environment variable and a parameter. A piped
 # install has nowhere to put a parameter, so use the variables there:
@@ -32,7 +32,7 @@
 #                                        Default: the newest release.
 #   RUNINFRA_INSTALL_DIR   -InstallDir   Default: %LOCALAPPDATA%\RunInfra\bin
 #   RUNINFRA_REPO          -Repo         owner/name holding the releases.
-#   RUNINFRA_BASE_URL      -BaseUrl      Take the artifacts from this directory
+#   RUNINFRA_INSTALL_BASE_URL -BaseUrl   Take the artifacts from this directory
 #                                        URL instead of a release. https:// and
 #                                        file:// only. Skips the version lookup.
 #   RUNINFRA_TARGET        -Target       Force the build to fetch, for example
@@ -46,6 +46,7 @@
 #   runinfra-linux-arm64         runinfra-windows-x64.exe
 #   runinfra-linux-arm64-musl    SHA256SUMS
 #                                SHA256SUMS.sig
+#                                THIRD-PARTY-NOTICES.txt
 #
 # SHA256SUMS is coreutils format: one "<64 lowercase hex>  <artifact>" line per
 # artifact. Windows on Arm is served the x64 build and told so, because Windows
@@ -59,10 +60,13 @@ param(
     [string] $Version = $env:RUNINFRA_VERSION,
     [string] $InstallDir = $env:RUNINFRA_INSTALL_DIR,
     [string] $Repo = $env:RUNINFRA_REPO,
-    [string] $BaseUrl = $env:RUNINFRA_BASE_URL,
+    [string] $BaseUrl = $env:RUNINFRA_INSTALL_BASE_URL,
     [string] $Target = $env:RUNINFRA_TARGET
 )
 
+# The call operator creates a child scope even when this file is fed to iex.
+# Preferences, StrictMode and installer helpers disappear on return or throw.
+& {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 # Invoke-WebRequest is not used here, but the progress renderer is global and
@@ -71,6 +75,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $RepoDefault = 'RightNow-AI/runinfra-cli'
 $BinaryName = 'runinfra.exe'
+$NoticesName = 'THIRD-PARTY-NOTICES.txt'
 $SupportedTargets = @('windows-x64')
 
 # Printed, never used to verify anything here, because nothing in Windows
@@ -136,17 +141,54 @@ function Get-DetectedTarget {
     }
 }
 
+function Get-HttpsUri {
+    param([Parameter(Mandatory = $true)][string] $Url)
+    $address = $null
+    if ($Url -match '[\x00-\x20\x7f]' -or $Url -match '^https:[/\\]*[^/\\?#]*@' -or
+        -not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref] $address) -or
+        $address.Scheme -ne 'https' -or [string]::IsNullOrEmpty($address.Host) -or
+        -not [string]::IsNullOrEmpty($address.UserInfo)) {
+        Fail 'Downloads require an HTTPS URL without user information.'
+    }
+    return $address
+}
+
+function New-HttpsRequest {
+    param([Parameter(Mandatory = $true)][Uri] $Address)
+    $null = Get-HttpsUri -Url $Address.AbsoluteUri
+    if ($null -ne [Net.ServicePointManager]::ServerCertificateValidationCallback) {
+        Fail 'Downloads require the default TLS certificate validation.'
+    }
+    $request = [System.Net.WebRequest]::Create($Address)
+    $request.AllowAutoRedirect = $false
+    $request.UserAgent = 'runinfra-installer'
+    $request.Timeout = 30000
+    $request.ReadWriteTimeout = 30000
+    return $request
+}
+
+function Get-LocalMirrorUri {
+    param([Parameter(Mandatory = $true)][string] $Url)
+    $address = $null
+    if ($Url -notmatch '^file:///' -or $Url -match '[\x00-\x1e\x7f\\]' -or
+        -not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref] $address) -or
+        -not $address.IsFile -or $address.IsUnc -or -not [string]::IsNullOrEmpty($address.Host) -or
+        -not [string]::IsNullOrEmpty($address.UserInfo) -or -not [string]::IsNullOrEmpty($address.Query) -or
+        -not [string]::IsNullOrEmpty($address.Fragment) -or $address.LocalPath -match '[\x00-\x1f\x7f]' -or
+        $address.LocalPath -match '^[/\\]{2}') {
+        Fail 'Downloads require HTTPS or an explicit local file mirror.'
+    }
+    return $address
+}
+
 function Get-LatestTag {
     param([Parameter(Mandatory = $true)][string] $Repository)
 
     # Asking github.com for /releases/latest answers with a redirect to the
     # tag. Reading that redirect costs no API rate limit, which matters on a
     # shared cloud address where the API budget is spent by everyone at once.
-    $request = [System.Net.HttpWebRequest]::Create("https://github.com/$Repository/releases/latest")
-    $request.AllowAutoRedirect = $false
+    $request = New-HttpsRequest -Address (Get-HttpsUri -Url "https://github.com/$Repository/releases/latest")
     $request.Method = 'HEAD'
-    $request.UserAgent = 'runinfra-installer'
-    $request.Timeout = 30000
 
     $response = $null
     try {
@@ -158,7 +200,8 @@ function Get-LatestTag {
         if ($null -eq $response) { return $null }
         $location = $response.Headers['Location']
         if ([string]::IsNullOrWhiteSpace($location)) { return $null }
-        return ($location.TrimEnd('/') -split '/')[-1]
+        $redirect = Get-HttpsUri -Url ([Uri]::new($request.RequestUri, $location)).AbsoluteUri
+        return ($redirect.AbsolutePath.TrimEnd('/') -split '/')[-1]
     } finally {
         if ($null -ne $response) { $response.Close() }
     }
@@ -169,18 +212,82 @@ function Save-Url {
         [Parameter(Mandatory = $true)][string] $Url,
         [Parameter(Mandatory = $true)][string] $Destination
     )
-    $client = New-Object System.Net.WebClient
+    $local = $Url.StartsWith('file:///', [StringComparison]::Ordinal)
+    if ($local) {
+        # A redirect never enters this branch. Only a caller-selected mirror
+        # authorizes local bytes, which go through the same checksum checks.
+        $selected = Get-Variable -Name BaseUrl -ValueOnly -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($selected) -or -not $Url.StartsWith($selected.TrimEnd('/') + '/', [StringComparison]::Ordinal)) {
+            Fail 'Downloads require HTTPS or an explicit local file mirror.'
+        }
+        $address = Get-LocalMirrorUri -Url $Url
+    } else { $address = Get-HttpsUri -Url $Url }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $complete = $false
+    $created = $false
+    $response = $null
+    $inputStream = $null
+    $outputStream = $null
+    $request = $null
     try {
-        if ($Url -like 'http*') { $client.Headers.Add('User-Agent', 'runinfra-installer') }
-        $client.DownloadFile($Url, $Destination)
+        if ($local) {
+            $inputStream = [IO.File]::OpenRead($address.LocalPath)
+            $expectedLength = $inputStream.Length
+        } else {
+        for ($redirects = 0; $redirects -le 5; $redirects++) {
+            if ($watch.ElapsedMilliseconds -ge 600000) { Fail 'The download timed out.' }
+            $request = New-HttpsRequest -Address $address
+            $request.Timeout = [int][Math]::Min(30000, 600000 - $watch.ElapsedMilliseconds)
+            $response = $request.GetResponse()
+            $status = [int]$response.StatusCode
+            if (@(301, 302, 303, 307, 308) -contains $status) {
+                $location = $response.Headers['Location']
+                if ($redirects -eq 5 -or [string]::IsNullOrWhiteSpace($location)) {
+                    Fail 'The download returned too many redirects or an invalid redirect.'
+                }
+                $address = Get-HttpsUri -Url ([Uri]::new($address, $location)).AbsoluteUri
+                $response.Close()
+                $response = $null
+                continue
+            }
+            if ($status -ne 200) { Fail 'The download did not return a complete file.' }
+            break
+        }
+        $expectedLength = $response.ContentLength
+        $inputStream = $response.GetResponseStream()
+        }
+        $maximumBytes = 536870912
+        if ($expectedLength -gt $maximumBytes) { Fail 'The download exceeds the 512 MiB limit.' }
+        $outputStream = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $created = $true
+        $buffer = New-Object byte[] 65536
+        $received = [long]0
+        while ($true) {
+            $remaining = 600000 - $watch.ElapsedMilliseconds
+            if ($remaining -le 0) { Fail 'The download timed out.' }
+            if ($inputStream.CanTimeout) { $inputStream.ReadTimeout = [int][Math]::Min(30000, $remaining) }
+            $count = $inputStream.Read($buffer, 0, $buffer.Length)
+            if ($count -eq 0) { break }
+            $received += $count
+            if ($received -gt $maximumBytes) { Fail 'The download exceeds the 512 MiB limit.' }
+            $outputStream.Write($buffer, 0, $count)
+        }
+        if ($expectedLength -ge 0 -and $received -ne $expectedLength) { Fail 'The download ended before the complete file arrived.' }
+        $outputStream.Flush($true)
+        $complete = $true
     } finally {
-        $client.Dispose()
+        if ($null -ne $outputStream) { $outputStream.Dispose() }
+        if ($null -ne $inputStream) { $inputStream.Dispose() }
+        if ($null -ne $response) { $response.Close() }
+        if ($null -ne $request) { $request.Abort() }
+        $watch.Stop()
+        if ($created -and -not $complete -and (Test-Path -LiteralPath $Destination)) {
+            Remove-Item -LiteralPath $Destination -Force
+        }
     }
 }
 
-# WebClient reports an HTTP 404 as "the connection was closed unexpectedly",
-# which sends the reader hunting for a network fault when the real answer is
-# that the file is not there. Dig the status code out and say it plainly.
+# Keep missing release assets distinguishable from a failed connection.
 function Get-TransferFailureReason {
     param([Parameter(Mandatory = $true)] $ErrorRecord)
     $exception = $ErrorRecord.Exception
@@ -199,7 +306,55 @@ function Get-TransferFailureReason {
 
 function Get-Sha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stream = $null
+    $hasher = $null
+    try {
+        # Hash directly without module discovery. Prefer the Windows FIPS provider.
+        $hasherType = 'System.Security.Cryptography.SHA256CryptoServiceProvider' -as [type]
+        $hasher = if ($null -ne $hasherType) {
+            $hasherType::new()
+        } else {
+            [System.Security.Cryptography.SHA256]::Create()
+        }
+        $stream = [System.IO.File]::OpenRead($Path)
+        return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ($null -ne $hasher) { $hasher.Dispose() }
+    }
+}
+
+function Get-ManifestChecksum {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Name,
+        [switch] $Optional
+    )
+    $expected = $null
+    $entryCount = 0
+    $malformed = $false
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $fields = $line.Trim() -split '\s+'
+        $listed = $false
+        foreach ($field in $fields) {
+            if ($field -ceq $Name -or $field -ceq "*$Name") { $listed = $true; break }
+        }
+        if (-not $listed) { continue }
+        $entryCount++
+        if ($fields.Count -ne 2 -or ($fields[1] -cne $Name -and $fields[1] -cne "*$Name")) {
+            $malformed = $true
+        } else {
+            $expected = $fields[0]
+        }
+    }
+    if ($entryCount -eq 0) {
+        if ($Optional) { return $null }
+        Fail "SHA256SUMS has no line for $Name." @('Nothing has been installed. This release is incomplete.')
+    }
+    if ($entryCount -ne 1 -or $malformed -or $expected -notmatch '^[0-9a-fA-F]{64}$') {
+        Fail "SHA256SUMS must contain exactly one valid sha256 hash for $Name." @('Nothing has been installed.')
+    }
+    return $expected.ToLowerInvariant()
 }
 
 function Test-PathContains {
@@ -219,11 +374,6 @@ function Install-RunInfraCli {
     if ($PSVersionTable.PSVersion.Major -lt 5) {
         Fail "this installer needs Windows PowerShell 5.1 or newer, and this is $($PSVersionTable.PSVersion)." @(
             'Windows 10 and Windows 11 ship 5.1 as standard.'
-        )
-    }
-    if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
-        Fail 'this PowerShell has no Get-FileHash, so the download cannot be verified.' @(
-            'Refusing to install bytes that cannot be checked against the published hash.'
         )
     }
 
@@ -268,15 +418,10 @@ function Install-RunInfraCli {
     $tag = $null
     if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
         $trimmed = $BaseUrl.Trim().TrimEnd('/')
-        if ($trimmed -like 'http://*') {
-            Fail "refusing an http:// source: $trimmed" @(
-                'The checksum would arrive over the same unprotected connection as the',
-                'binary, so anything able to change one can change the other. Use https.'
-            )
-        }
-        if (-not ($trimmed -like 'https://*' -or $trimmed -like 'file://*')) {
-            Fail "-BaseUrl must start with https:// or file://, got: $trimmed"
-        }
+        if ($trimmed.StartsWith('file:///', [StringComparison]::Ordinal)) {
+            $localMirror = Get-LocalMirrorUri -Url $trimmed
+            if (-not [IO.Directory]::Exists($localMirror.LocalPath)) { Fail 'The local file mirror directory does not exist.' }
+        } else { $null = Get-HttpsUri -Url $trimmed }
         $sourceBase = $trimmed
         $sourceLabel = $trimmed
     } else {
@@ -331,6 +476,12 @@ function Install-RunInfraCli {
     # different drive, which turns the last step into a slow copy that can be
     # interrupted half written.
     $staged = Join-Path $directory (".runinfra.download.$PID.exe")
+    $stagedNotices = Join-Path $directory (".$NoticesName.download.$PID")
+    $noticesDestination = Join-Path $directory $NoticesName
+    $noticesBackup = Join-Path $directory (".$NoticesName.previous.$PID")
+    $noticesReplaced = $false
+    $binaryInstalled = $false
+    $keepNoticesBackup = $false
     $sums = Join-Path ([System.IO.Path]::GetTempPath()) "runinfra-SHA256SUMS.$PID"
     $backup = "$destination.old"
 
@@ -359,23 +510,7 @@ function Install-RunInfraCli {
         # GNU writes "<hash>  <name>", and in binary mode "<hash> *<name>".
         # Match both, and match the exact name so that a line for a different
         # build can never be read as this one's.
-        $expected = $null
-        foreach ($line in (Get-Content -LiteralPath $sums)) {
-            $fields = $line.Trim() -split '\s+', 2
-            if ($fields.Count -lt 2) { continue }
-            if ($fields[1].TrimStart('*') -eq $artifact) { $expected = $fields[0]; break }
-        }
-        if ([string]::IsNullOrWhiteSpace($expected)) {
-            Fail "SHA256SUMS has no line for $artifact." @(
-                "Nothing has been installed. This release is incomplete for $target."
-            )
-        }
-        if ($expected -notmatch '^[0-9a-fA-F]{64}$') {
-            Fail "the SHA256SUMS entry for $artifact is not a sha256 hash." @(
-                'Nothing has been installed.'
-            )
-        }
-        $expected = $expected.ToLowerInvariant()
+        $expected = Get-ManifestChecksum -Path $sums -Name $artifact
 
         Write-Plain 'Verifying checksum'
         $actual = Get-Sha256 -Path $staged
@@ -386,6 +521,29 @@ function Install-RunInfraCli {
                 'The download is damaged or it is not the file the release published.',
                 'Try again, and if it happens twice do not use the file.'
             )
+        }
+
+        # Releases before bundled third-party notices did not list this file.
+        # Once listed, it is required and checked before the binary is run.
+        $noticesExpected = Get-ManifestChecksum -Path $sums -Name $NoticesName -Optional
+        if ($null -ne $noticesExpected) {
+            Write-Plain "Downloading $NoticesName"
+            try {
+                Save-Url -Url "$sourceBase/$NoticesName" -Destination $stagedNotices
+            } catch {
+                Fail "could not download $NoticesName listed in SHA256SUMS." @(
+                    (Get-TransferFailureReason -ErrorRecord $_),
+                    'Nothing has been installed. This release is incomplete.'
+                )
+            }
+            $noticesActual = Get-Sha256 -Path $stagedNotices
+            if ($noticesActual -ne $noticesExpected) {
+                Fail "checksum mismatch on $NoticesName. Nothing has been installed." @(
+                    "expected  $noticesExpected",
+                    "got       $noticesActual",
+                    'Try again, and if it happens twice do not use the file.'
+                )
+            }
         }
 
         # Said out loud, next to the check that did run, so nobody reads
@@ -411,7 +569,7 @@ function Install-RunInfraCli {
         Write-Plain "The public key to save as runinfra-release.pub, its fingerprint"
         Write-Plain "$ReleaseKeyFingerprint,"
         Write-Plain 'and what a good signature does and does not prove, are all in'
-        Write-Plain 'cli/README.md under "Verifying a release".'
+        Write-Plain 'https://github.com/RightNow-AI/runinfra-cli#verifying-a-release.'
         Write-Plain ''
 
         # Run the staged copy before it takes the real name. If it cannot run
@@ -439,6 +597,23 @@ function Install-RunInfraCli {
             )
         }
 
+        # Put verified attribution beside the binary before promoting it. A
+        # failed binary replacement restores the previous notices in finally.
+        if ($null -ne $noticesExpected) {
+            if (Test-Path -LiteralPath $noticesDestination) {
+                if (-not (Test-Path -LiteralPath $noticesDestination -PathType Leaf)) {
+                    Fail "$noticesDestination is not a file." @('Nothing has been replaced. Move it aside and try again.')
+                }
+                Copy-Item -LiteralPath $noticesDestination -Destination $noticesBackup -Force
+            }
+            $noticesReplaced = $true
+            try {
+                Move-Item -LiteralPath $stagedNotices -Destination $noticesDestination -Force
+            } catch {
+                Fail "could not put $NoticesName into $directory." @('Nothing has been replaced.', $_.Exception.Message)
+            }
+        }
+
         # Windows will not let a running program be overwritten, but it will
         # let one be renamed. Move the old one aside, put the new one in, and
         # only then try to delete the old one.
@@ -460,6 +635,7 @@ function Install-RunInfraCli {
 
         try {
             Move-Item -LiteralPath $staged -Destination $destination -Force
+            $binaryInstalled = $true
         } catch {
             # Put the previous install back rather than leave the machine with
             # no CLI at all.
@@ -480,6 +656,21 @@ function Install-RunInfraCli {
             }
         }
     } finally {
+        if ($noticesReplaced -and -not $binaryInstalled) {
+            try {
+                if (Test-Path -LiteralPath $noticesBackup) {
+                    Move-Item -LiteralPath $noticesBackup -Destination $noticesDestination -Force
+                } elseif (Test-Path -LiteralPath $noticesDestination) {
+                    Remove-Item -LiteralPath $noticesDestination -Force
+                }
+            } catch {
+                $keepNoticesBackup = $true
+                Write-Plain "Could not restore the previous notices at $noticesDestination."
+                if (Test-Path -LiteralPath $noticesBackup) {
+                    Write-Plain "The previous notices remain at $noticesBackup."
+                }
+            }
+        }
         # A half written program in the install directory is worse than none,
         # and it is a file the user did not ask for. It never survives us.
         if (Test-Path -LiteralPath $staged) {
@@ -487,6 +678,12 @@ function Install-RunInfraCli {
         }
         if (Test-Path -LiteralPath $sums) {
             Remove-Item -LiteralPath $sums -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stagedNotices) {
+            Remove-Item -LiteralPath $stagedNotices -Force -ErrorAction SilentlyContinue
+        }
+        if (-not $keepNoticesBackup -and (Test-Path -LiteralPath $noticesBackup)) {
+            Remove-Item -LiteralPath $noticesBackup -Force -ErrorAction SilentlyContinue
         }
     }
 
@@ -513,11 +710,13 @@ function Install-RunInfraCli {
     Write-Plain 'appends rather than replaces:'
     Write-Plain ''
     Write-Plain '  [Environment]::SetEnvironmentVariable(''Path'','
-    Write-Plain "    [Environment]::GetEnvironmentVariable('Path','User') + ';$directory', 'User')"
+    $quotedDirectory = $directory.Replace("'", "''")
+    Write-Plain "    [Environment]::GetEnvironmentVariable('Path','User') + ';$quotedDirectory', 'User')"
     Write-Plain ''
     Write-Plain 'Run it, then open a new terminal. This installer does not change'
     Write-Plain 'your PATH on its own. Until then, the full path works:'
-    Write-Plain "  $destination login"
+    $quotedDestination = $destination.Replace("'", "''")
+    Write-Plain "  & '$quotedDestination' login"
 }
 
 try {
@@ -536,4 +735,5 @@ try {
     # Rethrown so `powershell -File install.ps1` reports failure to whatever
     # ran it. Never `exit`: that would close an interactive window.
     throw 'runinfra install failed.'
+}
 }
