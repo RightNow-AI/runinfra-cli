@@ -63,6 +63,53 @@ openssl pkeyutl -verify -pubin -inkey runinfra-release.pub -rawin -in SHA256SUMS
 
 A CI-held key proves the artifact came out of this pipeline and nothing more.
 
+## Updates
+
+`runinfra update --check` reports a newer stable release without installing.
+Run `runinfra update` to review and approve installation, or add `--yes` to
+approve it in a script. `--version X.Y.Z` selects a specific newer stable
+version. Equal versions, downgrades and prereleases are refused when pinned.
+`--check --version X.Y.Z` confirms that the exact public release exists and
+is final before reporting it as available.
+
+Each installed channel keeps its own installer:
+
+| Channel | Update command |
+| --- | --- |
+| npm | `npm install -g @runinfra/cli@<target>` |
+| Python | `<python> -m pip install --upgrade runinfra-cli==<target>` with the interpreter that launched the CLI |
+| pipx | `pipx upgrade runinfra-cli` |
+| Standalone | Downloads and verifies the signed release, then replaces the executable and notices |
+
+pipx manages its own package version, so `--version` is refused for a pipx
+installation. If an installer is missing or fails, the CLI reports its exit
+code when available and prints the exact command to run by hand. Windows npm
+uses the installed npm script with the running Node interpreter. Package
+manager output inherits the terminal; with `--json` or redirected stdout,
+installer output goes to stderr so the result stream remains parseable.
+
+Standalone updates download the public release from GitHub. They verify the
+Ed25519 signature with the public key embedded in the CLI, check the binary
+and `THIRD-PARTY-NOTICES.txt` against the signed checksums. Staging saves
+verified bytes without executing them. Before replacement, the updater
+rechecks and probes a temporary copy beside the installed executable.
+If replacement fails, it attempts to restore the previous executable and notices.
+Update downloads and package installers never receive a credential.
+
+Automatic updates run at most once per 24 hours after a command has learned
+of a newer stable release. Linux and macOS standalone installations stage a
+verified update in the background and apply it on the next start. Windows
+standalone installations do not stage or apply automatic updates.
+Windows standalone, npm and Python installations only show `Run: runinfra update`.
+For npm and Python installations in the full-screen app,
+select `Update available: <version>` and press Enter to exit the app, restore
+the terminal and run the update in the foreground.
+
+Set `RUNINFRA_NO_UPDATE=1` to turn off automatic updates and notices.
+Automatic updates also stay off in CI, when stdin or stdout is redirected,
+during `update`, `login` or `logout`, with `--json`, or while another update
+holds the lock. The explicit `runinfra update` command remains available.
+
 ## Commands
 
 | Command                                                                                                    | What it does                                                                                 |
@@ -88,6 +135,7 @@ A CI-held key proves the artifact came out of this pipeline and nothing more.
 | `runinfra plan buy <starter\|pro\|team> [--json]` | Opens plan checkout in your browser, then waits for the confirmed change. |
 | `runinfra plan settings [--json]` | Opens plan settings in your browser, then waits for the confirmed change. |
 | `runinfra doctor [--verify] [--offline] [--out DIR] [--json]`                                              | Diagnoses connections. It sends no paid request unless `--verify` is present.                |
+| `runinfra update [--check] [--version X.Y.Z] [--yes] [--json]` | Checks for or installs a newer stable CLI release using its original channel. |
 | `runinfra tui`                                                                                             | Opens the interactive terminal view.                                                         |
 | `runinfra help [--json]`                                                                                   | Shows command help.                                                                         |
 | `runinfra version [--json]`                                                                                | Shows the installed CLI version.                                                             |
@@ -235,6 +283,14 @@ For other commands, redirected output is NDJSON using CliEvent v1:
 on stdout. Each command produces one final result document, carried in
 `data.document` on the NDJSON `result` event.
 
+`runinfra update --json` returns `schemaVersion: "runinfra.update/1"`,
+`command`, `ok`, `exitCode`, `channel`, `currentVersion`, `targetVersion`,
+`check`, `status`, `commandLine`, `installerExitCode`, `code` and `message`.
+Unknown target, command, installer exit code and error code values are
+`null`. Check success uses `available` or `current`; a verified standalone
+swap uses `updated`; package manager success uses `installer-complete`.
+Other statuses are `consent-required`, `cancelled`, `refused` and `failed`.
+
 `runinfra plan --json` returns the validated `runinfra.cli.plan/1` resource directly.
 Other results have the string `schemaVersion: "runinfra.<command>/1"`. Optional
 numbers are `null` when absent or carry both `value` and `basis`. Unknown data
@@ -295,6 +351,19 @@ The CLI uses the platform configuration directory, overridden by
 snapshots, and locks remain under the existing `connect` subdirectory so prior
 connections can be restored.
 
+Standalone update staging lives in the private `updates` subdirectory.
+On Windows, explicit updates save a transaction marker so a later start of
+`runinfra.exe` or `runinfra.exe.old` can recover an interrupted swap. Cleanup removes only
+backups whose size and checksum match that transaction. The two executable
+renames are not atomic, so an interruption can leave the normal executable
+path missing until recovery runs. Recovery needs a binary that includes this logic.
+To recover by hand, rename `runinfra.exe.old` back to `runinfra.exe`, or rerun the installer.
+
+An interrupted update can leave an executable `.update.lock` or a staging
+`stage.lock`. If the CLI reports one, close all CLI processes and remove only
+the named lock before retrying. The updater refuses uncertain lock ownership.
+If rollback failed, restore the saved files before removing the lock.
+
 ## Environment
 
 | Variable              | Purpose                                                                                   |
@@ -302,6 +371,7 @@ connections can be restored.
 | `RUNINFRA_API_BASE`   | Points the CLI at another deployment. Plaintext HTTP is allowed only for a loopback host. |
 | `RUNINFRA_CONFIG_DIR` | Overrides the platform configuration directory.                                           |
 | `RUNINFRA_NO_TUI`     | Disables the interactive view.                                                            |
+| `RUNINFRA_NO_UPDATE`  | Set to `1` to disable automatic updates and notices. |
 | `RUNINFRA_REDUCED_MOTION` | Set to `1` for a still pending indicator. Nonempty `NO_COLOR`, non-TTY and dumb terminals also suppress motion. |
 
 Configured proxy routing is unavailable in this build. Requests requiring a
