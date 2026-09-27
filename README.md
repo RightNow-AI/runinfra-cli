@@ -102,7 +102,7 @@ verified update in the background and apply it on the next start. Windows
 standalone installations do not stage or apply automatic updates.
 Windows standalone, npm and Python installations only show `Run: runinfra update`.
 For npm and Python installations in the full-screen app,
-select `Update available: <version>` and press Enter to exit the app, restore
+choose `Update available: <version>` and press Enter to close the app, restore
 the terminal and run the update in the foreground.
 
 Set `RUNINFRA_NO_UPDATE=1` to turn off automatic updates and notices.
@@ -172,7 +172,7 @@ expiry or explicit revocation in Settings, API keys.
 Status shows what pays now. Money totals count credits only.
 
 At first TUI sign-in, choose **Pay as you go** or **Coding plan**.
-Escape selects **Pay as you go**.
+Escape goes back without choosing a payment method.
 The question appears once per workspace when sales are open and no plan exists.
 Tier prices come from the server. Only an owner can buy in the browser.
 Plain `runinfra login` prints one offer hint.
@@ -194,13 +194,18 @@ Relocatable agents use `<agent>-run` without changing their own settings.
 Use `--name` for another launcher name. Profiles use `--key-source file`.
 In-place agents say so in Review.
 
+The usual setup takes three Enters: start sign-in, review the selected agents,
+then approve Review. Browser approval saves sign-in automatically.
+The starting model and command name are ready to use; `m` changes the model
+and `e` renames the command in Review. Some agents need a model choice.
 Enter opens the next step. Read Review to the end and clear its blockers.
 Then Enter or `y` approves. Escape goes back. Held or pasted keys never approve.
 If asked, paste harmless text once, then reread Review.
 If blocked, use a supported terminal.
 
-Agents, Models, Done and Status use aligned columns. Narrow terminals omit lower
-priority columns; open the focused row's evidence to inspect the full facts.
+Agents keeps a stable list and shows the focused agent's logo. Models shows
+the provider mark when available. Connected agents open Status from Home.
+Use `i` for details when narrow terminals hide lower-priority facts.
 Account supports Up and Down scrolling, including expiry and permissions.
 
 Manual completion records your report locally. It does not change an agent's
