@@ -114,16 +114,17 @@ holds the lock. The explicit `runinfra update` command remains available.
 
 | Command                                                                                                    | What it does                                                                                 |
 | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `runinfra login [--device] [--paste] [--json]`                                                             | Signs this terminal in.                                                                      |
+| `runinfra login [--device] [--no-wait] [--timeout <seconds>] [--paste] [--json]`                            | Signs this terminal in.                                                                      |
 | `runinfra logout [--local] [--disconnect-all] [--yes] [--json]`                                            | Signs out, optionally disconnecting every managed agent first.                               |
 | `runinfra whoami [--json]`                                                                                 | Shows the stored terminal identity without printing a key.                                   |
 | `runinfra status [--window 15m\|1h\|24h] [--offline] [--json]`                                             | Open live usage in a terminal.                                                              |
 | `runinfra agents [--all] [--json]`                                                                         | Detects supported agents and never writes.                                                   |
-| `runinfra connect <agent>... [--name NAME] [--model ID] [--key-source file\|env] [--preview] [--yes] [--json]` | Creates separate commands for relocatable agents. Use --name with one agent. |
-| `runinfra connect --detected [--model ID] [--key-source file\|env] [--preview] [--yes] [--json]` | Prepares the same batch for every supported agent found locally.                             |
+| `runinfra connect <agent>... [--funding plan\|credits] [--name NAME] [--model ID] [--key-source file\|env] [--preview] [--yes] [--json]` | Reviews each agent's placement and payment. Use --name only with one forked agent. |
+| `runinfra connect --detected [--funding plan\|credits] [--model ID] [--key-source file\|env] [--preview] [--yes] [--json]` | Prepares the same batch for every supported agent found locally.                             |
+| `runinfra launch <agent> [--funding plan\|credits] [--yes] [--json]` | Starts Claude Code or OpenCode with temporary configuration and every eligible model. |
 | `runinfra disconnect <agent>... [--force] [--keep-key] [--yes] [--json]` | Removes a named profile, or restores an in-place connection. |
 | `runinfra models [--harness AGENT] [--json]`                                                               | Lists available models.                                                                      |
-| `runinfra models set <agent> <model-id> [--yes] [--json]`                                                  | Changes one connected agent's model.                                                         |
+| `runinfra models set <agent> <model-id> [--yes] [--json]` | Changes a fork or slot's model. Additive connections use the agent's picker. |
 | `runinfra models sync [--yes] [--verify] [--json]`                                                         | Refreshes connected agents from the current catalog.                                         |
 | `runinfra keys [--json]`                                                                                   | Lists agent key prefixes.                                                          |
 | `runinfra keys rotate <agent> [--yes] [--json]`                                                            | Replaces an agent key in safe order.                                                         |
@@ -171,10 +172,10 @@ expiry or explicit revocation in Settings, API keys.
 `runinfra plan` shows your plan, window use and reset times.
 Status shows what pays now. Money totals count credits only.
 
-At first TUI sign-in, choose **Pay as you go** or **Coding plan**.
-Escape goes back without choosing a payment method.
-The question appears once per workspace when sales are open and no plan exists.
-Tier prices come from the server. Only an owner can buy in the browser.
+In the full-screen app, Confirm shows what pays for one agent. Press `p` to
+switch between **Coding plan** and **Pay as you go** when both are available.
+Without a plan, use credits. To buy a plan, run `runinfra plan buy <starter|pro|team>`.
+Escape goes back without connecting.
 Plain `runinfra login` prints one offer hint.
 
 `runinfra plan buy <starter|pro|team>` opens checkout.
@@ -182,31 +183,58 @@ Plain `runinfra login` prints one offer hint.
 The CLI checks for a confirmed change for up to ten minutes.
 Ctrl-C stops waiting. It does not cancel a browser purchase.
 
-Connect selects a covered model for a serving plan, including OpenCode and
-Command Code. Keys say which payer applies. Credits-only keys need credits.
+Use `--funding plan` or `--funding credits` with `connect` for the same choice.
+Coding plan first pays from the plan, then credits under your workspace policy.
+Plan-funded connections add covered models; models added earlier stay, and any outside the plan pay from credits.
+Pay as you go uses workspace credits even with a serving plan, and needs a balance.
+Omit `--funding` to keep the workspace policy and existing key payment settings.
+Members who can manage keys can choose funding for new agent keys. Changing a
+reused key's payer requires a workspace owner and is disclosed in Confirm.
+That change applies wherever the key is used.
 Plan changes require browser confirmation. `keys cap` changes spend caps after
-review. Key payment settings stay unchanged.
-Rotate Credits-only keys in the dashboard to preserve their payer.
+review.
+Rotating a Credits-only key creates a Credits-only replacement.
 
 ## Connect safety and consent
 
-Relocatable agents use `<agent>-run` without changing their own settings.
-Use `--name` for another launcher name. Profiles use `--key-source file`.
-In-place agents say so in Review.
+Agents that support additive setup get all eligible RunInfra models beside your
+current provider, keeping your selected provider and default model.
+When the agent sets no default model, Confirm says it may start on one of the RunInfra models.
+Other relocatable agents use `<agent>-run` without changing their own settings.
+Use `--name` only for a forked agent. Profiles use `--key-source file`.
+Agents with one provider slot get one initial model, disclosed in Confirm.
+Existing connections keep their recorded placement.
+`--model ID` chooses an initial model for a fork or slot without limiting the
+written model list. Additive setup keeps your current selection.
+For additive connections, use the agent's own picker to choose a model under RunInfra.
+`models set` refuses these connections and shows the adapter's picker instructions.
+`models sync` and key rotation preserve their placement and current selection.
 
-The usual setup takes three Enters: start sign-in, review the selected agents,
-then approve Review. Browser approval saves sign-in automatically.
-The starting model and command name are ready to use; `m` changes the model
-and `e` renames the command in Review. Some agents need a model choice.
-Enter opens the next step. Read Review to the end and clear its blockers.
-Then Enter or `y` approves. Escape goes back. Held or pasted keys never approve.
-If asked, paste harmless text once, then reread Review.
+The full-screen app connects one agent at a time. Sign-in opens when needed.
+Installed agents appear first. Nothing is selected in advance. Press Enter on
+one agent to see its command, models, payment and paid check on Confirm.
+Press Enter again to connect. Press `n` to rename a new command inline.
+Done shows how to start the agent and pick one of RunInfra's models. Escape returns
+to Agents to connect another. Press `r` to check agents again, `m` to show
+more agents, or `?` for help.
+Browser approval saves sign-in automatically. Connect chooses the available
+models automatically; Models remains for `models set` and `models sync`.
+Read every warning on Confirm before approving. Held or pasted keys never approve.
+Press `d` on Confirm to inspect details and files.
+If asked, paste harmless text once, then reread Confirm.
 If blocked, use a supported terminal.
 
-Agents keeps a stable list and shows the focused agent's logo. Models shows
+Agents shows one calm line while checking, then a stable list. Models shows
 the provider mark when available. Connected agents open Status from Home.
-Use `i` for details when narrow terminals hide lower-priority facts.
+Use `i` for details, or metric definitions on Status. On Status, Enter opens a row's details.
 Account supports Up and Down scrolling, including expiry and permissions.
+
+**Claude Code notes:** A 1M model may have a smaller context limit if
+`DISABLE_COMPACT` is enabled in project, local, command-line or managed Claude
+settings the CLI cannot inspect. The CLI leaves
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` unset when it sees `DISABLE_COMPACT` enabled in
+user settings or the launching environment and a 1M model is listed. The unseen
+setting can reduce available context; it does not change billing or remove data.
 
 Manual completion records your report locally. It does not change an agent's
 configuration, send a paid probe, or claim that the connection is active. A failed
@@ -219,8 +247,9 @@ already succeeded and key revocation failed, the next Review contains only the
 retained key operation. Counts and previews describe the exact scope; changed
 files or snapshots require a fresh Review.
 
-`runinfra connect` detects first, resolves sign-in and models, and prepares
-every file edit before asking once for the whole batch. The review includes:
+`runinfra connect` detects first, resolves sign-in, payment and models, and prepares
+every file edit before asking once for the whole batch. Confirm summarizes agent
+outcomes and payment. Its details include:
 
 - every destination file and its `+N/-M` line count;
 - where the key will be placed;
@@ -243,7 +272,7 @@ in shell output and the TUI with a sign-in layer and recovery instructions.
 
 To move an agent to the current workspace, use
 `runinfra disconnect <agent> --keep-key`, then repeat the original
-`runinfra connect <agent>` command with the same `--model`, `--key-source` and
+`runinfra connect <agent>` command with the same `--funding`, `--model`, `--key-source` and
 `--preview` options and review the new connection. Alternatively, sign in to the key's workspace.
 Disconnecting with `--keep-key` keeps the previous key without scheduling revocation.
 Pending revocations proceed only after a review names their IDs and you approve, or through `runinfra keys revoke --id <keyId>`.
@@ -274,6 +303,56 @@ reports why. Connect, disconnect and key rotation do not perform this service ch
 Keys are never accepted on argv. Use `runinfra login`; do not pass a key through
 a command-line flag or positional value. Full agent keys appear only in the
 acknowledged live manual handoff for 20 seconds, never in receipts or saved logs.
+
+## For coding agents
+
+Use piped shell commands with `--json`. `--json` or `CI=1` turns prompts off
+even under a PTY. Check this terminal first:
+
+```console
+runinfra whoami --json
+```
+
+If sign-in is needed, create a device request without holding the shell open:
+
+```console
+runinfra login --device --no-wait --json
+```
+
+Relay `userCode` and `verificationUri` to the human. The response includes
+`pending: true` and `expiresAt`. Ask them to approve that code in their browser,
+then resume with the same API base and configuration directory:
+
+```console
+runinfra login --device --json --timeout 100
+```
+
+Repeat until exit 0. Exit 3 with `auth_pending` means approval is still pending;
+the same code, link and expiry are returned. Other exit 3 codes require their
+reported recovery action. Expired requests are replaced on the next sign-in.
+The private pending file keeps the device bearer code and PKCE verifier;
+neither appears in output. Logout clears it after the usual consent.
+
+```console
+runinfra agents --json
+runinfra connect <agent> --json --funding plan|credits
+```
+
+Replace `<agent>` with an agent ID and `plan|credits` with `plan` or `credits`.
+Without `--yes`, connect exits 8 with the complete plan. Show that plan to the
+human, including file changes, keys, funding and paid verification requests.
+Only after they agree, repeat it with `--yes`:
+
+```console
+runinfra connect <agent> --json --funding plan|credits --yes
+```
+
+Read `nextSteps`, one entry per connected agent: `agent` is the native agent ID,
+`name` its display name, `placement` its engine placement, `command` the separate
+command or `null` for in-place setup, and `pickHint` and `restart` the adapter's
+sentences. Relay those instructions to the human. NDJSON carries the same
+fields in its result document and the Use code event carries
+`data: { userCode, verificationUri, expiresAt }`.
 
 ## Output contracts
 
@@ -311,6 +390,23 @@ selects the usage window. Defaults to 15m live, 24h in one-shot output.
 `--json`, redirected output, CI, `--offline`, and `RUNINFRA_NO_TUI=1`
 keep the one-shot local, service, account, and usage report.
 
+The live frame uses the terminal width up to its content cap. Table names fit the
+visible rows, with spare width shared between columns. Every row that fits is shown.
+Overflow keeps the row-count caption. Existing rows keep their positions as counts
+refresh; new rows append.
+
+A muted `-` means not measured or unavailable, never zero. A `+` marks a lower bound;
+`est.` or `estimated` marks an estimate. Cache rates cover only reported cache use.
+First-token p95 needs 20 streams. Days or hours left are estimated from this window's
+accrued credit spend. Stale balances keep their read time instead of a runway.
+
+Charts use complete buckets only, excluding clipped window edges. Wider charts
+show more buckets or widen each measured bucket, without inventing values. Blank
+chart cells are missing measurements; the lowest bar is measured zero. Settling
+buckets stay marked. Press Enter for row Details or `?` for help and the `i`
+definitions control. Definitions retain window totals, cache savings, samples,
+credit estimates and the distinction between accrued and charged costs.
+
 A failed account read preserves local and service facts. Without sign-in,
 usage is `[unknown] not signed in`.
 
@@ -334,7 +430,7 @@ Online Status and Home read service metadata for free and never send paid reques
 | 0    | success                                                            |
 | 1    | unexpected internal error                                          |
 | 2    | bad usage, unsupported runtime, or local precheck                  |
-| 3    | not signed in, denied, expired, or revoked                         |
+| 3    | not signed in, denied, expired, revoked, or auth_pending (awaiting approval) |
 | 4    | entitlement or plan refused, or the requested agent, key or resource was not found |
 | 5    | network, server, readiness, or requested measurement unavailable   |
 | 6    | integrity or configuration verification failure                    |
@@ -351,7 +447,8 @@ terminal key is revoked. If saving fails, the previous key stays active.
 
 The CLI uses the platform configuration directory, overridden by
 `RUNINFRA_CONFIG_DIR`. Persistent and transient files include
-`credentials.json`, `credentials.json.<random>.tmp`, `update-check.json`,
+`credentials.json`, `credentials.json.<random>.tmp`, `pending-device.json`,
+`pending-device.json.<random>.tmp`, `update-check.json`,
 `update-check.json.<pid>.tmp`, and `update-check.json.lock`. Connection state,
 snapshots, and locks remain under the existing `connect` subdirectory so prior
 connections can be restored.
@@ -397,3 +494,17 @@ failure, never as a missing credential. CRLF JSON is accepted.
 If the browser does not open, use the displayed sign-in URL. Remote TUI
 sessions and `login --device` use a device code; plain headless login keeps
 its shared-key fallback. Cancel any firewall prompt and use a device code.
+
+## Temporary agent launch
+
+`runinfra launch <agent> [--funding plan|credits] [--yes] [--json]` starts Claude Code or OpenCode with every eligible model in a private temporary configuration. Use `runinfra connect` for persistent setup. Agent argument passthrough, Codex, Pi and other adapters are not supported in this first cut.
+
+The review names the workspace, customer key creation or reuse, and payer. New keys in automation require explicit funding and `--yes`. Without approval, a noninteractive run exits 8; refusing the prompt exits 9. A reused key keeps its payer, and conflicting funding is refused. Coding plan first can fall back to workspace credits under workspace policy. Launch sends no paid verification request. The harness's own inference requests use the selected payer.
+
+Personal settings and plugins are omitted. OpenCode and its tools see a temporary home and XDG directories. The current directory and terminal streams are preserved. Files the agent creates in your project remain; its temporary configuration and session data are removed after exit. Managed policy remains authoritative. Launch refuses managed plugins and routing or authentication settings it cannot verify. OpenCode uses only models from RunInfra. Node diagnostic and profiling options are removed to keep the launch key out of diagnostic files. Other runtime options, including proxy and certificate settings, are preserved.
+
+Reuses the agent's saved key, or a key saved by an earlier launch. Otherwise it creates one and saves it for future launches. It reaches the child through its environment, never generated configuration or arguments. Cleanup does not revoke it. Use `runinfra keys`, then `runinfra keys revoke --id <keyId> --yes`, or `runinfra logout --disconnect-all --yes` to revoke retained access.
+
+The temporary root is under the OS temp directory. POSIX directories/files use 0700/0600; Windows directory ACLs are verified before spawn. Links and junctions are refused. Failed deletion is reported without claiming success. A later launch sweeps owned, provably dead, unspawned or explicitly closed sessions. Ambiguous descendants, live or reused PIDs, interrupted spawns, and unconfirmed Windows tree termination are retained for review.
+
+With `--json`, stdout contains one `runinfra.launch/1` document: `modelCount`, `payer`, `keyAction` (created or reused), `child` (exit code, signal and started), and `cleanup` (deleted or retained). Child output goes to stderr in JSON and redirected-output modes. Human output says `Starting <agent> with N RunInfra models for this session only.` and confirms deletion only after it succeeds.
