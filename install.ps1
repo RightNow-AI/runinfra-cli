@@ -692,7 +692,7 @@ function Install-RunInfraCli {
     Write-Plain "Installed $reported to $destination"
 
     if (Test-PathContains -PathValue $env:PATH -Directory $directory) {
-        Write-Plain 'Run: runinfra login'
+        Write-Plain 'Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup'
         return
     }
 
@@ -700,7 +700,7 @@ function Install-RunInfraCli {
     if (Test-PathContains -PathValue $userPath -Directory $directory) {
         Write-Plain ''
         Write-Plain "$directory is already on your PATH, but not in this window."
-        Write-Plain 'Open a new terminal, then run: runinfra login'
+        Write-Plain 'Open a new terminal. Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup'
         return
     }
 
@@ -716,7 +716,8 @@ function Install-RunInfraCli {
     Write-Plain 'Run it, then open a new terminal. This installer does not change'
     Write-Plain 'your PATH on its own. Until then, the full path works:'
     $quotedDestination = $destination.Replace("'", "''")
-    Write-Plain "  & '$quotedDestination' login"
+    Write-Plain "  & '$quotedDestination'"
+    Write-Plain 'Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup'
 }
 
 try {

@@ -1052,7 +1052,7 @@ say "Installed ${installed_version} to ${destination}"
 
 case ":${PATH:-}:" in
 *":${install_dir}:"*)
-	say "Run: ${BINARY_NAME} login"
+	say "Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup"
 	;;
 *)
 	profile_hint="$HOME/.profile"
@@ -1077,7 +1077,8 @@ case ":${PATH:-}:" in
 	say "  ${path_line}"
 	say ""
 	say "This installer does not edit your shell files. Until you add that line,"
-	say "the full path works: ${destination} login"
+	say "the full path works: ${destination}"
+	say "Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup"
 	;;
 esac
 
