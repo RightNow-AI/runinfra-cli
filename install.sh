@@ -1053,10 +1053,13 @@ say "Installed ${installed_version} to ${destination}"
 case ":${PATH:-}:" in
 *":${install_dir}:"*)
 	say "Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup"
+	say "To set it up yourself, run runinfra."
 	;;
 *)
 	profile_hint="$HOME/.profile"
-	path_line="export PATH=\"${install_dir}:\$PATH\""
+	quoted_install_dir="$(printf '%s' "$install_dir" | sed "s/'/'\\\\''/g")"
+	quoted_destination="$(printf '%s' "$destination" | sed "s/'/'\\\\''/g")"
+	path_line="export PATH='${quoted_install_dir}':\"\$PATH\""
 	case "$(basename "${SHELL:-sh}")" in
 	zsh) profile_hint="$HOME/.zshrc" ;;
 	bash)
@@ -1067,7 +1070,10 @@ case ":${PATH:-}:" in
 		;;
 	fish)
 		profile_hint="$HOME/.config/fish/config.fish"
-		path_line="fish_add_path ${install_dir}"
+		# Fish single quotes escape both backslashes and apostrophes.
+		quoted_install_dir="$(printf '%s' "$install_dir" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
+		quoted_destination="$(printf '%s' "$destination" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
+		path_line="fish_add_path '${quoted_install_dir}'"
 		;;
 	esac
 	say ""
@@ -1077,8 +1083,9 @@ case ":${PATH:-}:" in
 	say "  ${path_line}"
 	say ""
 	say "This installer does not edit your shell files. Until you add that line,"
-	say "the full path works: ${destination}"
+	say "the full path works: '${quoted_destination}'"
 	say "Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup"
+	say "To set it up yourself, run the full path above, or runinfra once your PATH is set."
 	;;
 esac
 

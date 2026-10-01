@@ -693,6 +693,7 @@ function Install-RunInfraCli {
 
     if (Test-PathContains -PathValue $env:PATH -Directory $directory) {
         Write-Plain 'Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup'
+        Write-Plain 'To set it up yourself, run runinfra.'
         return
     }
 
@@ -701,6 +702,7 @@ function Install-RunInfraCli {
         Write-Plain ''
         Write-Plain "$directory is already on your PATH, but not in this window."
         Write-Plain 'Open a new terminal. Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup'
+        Write-Plain 'To set it up yourself, run runinfra in the new terminal.'
         return
     }
 
@@ -710,14 +712,17 @@ function Install-RunInfraCli {
     Write-Plain 'appends rather than replaces:'
     Write-Plain ''
     Write-Plain '  [Environment]::SetEnvironmentVariable(''Path'','
-    $quotedDirectory = $directory.Replace("'", "''")
+    # PowerShell recognizes smart single quotes as string delimiters too.
+    $singleQuoteCharacters = "'" + [char]0x2018 + [char]0x2019 + [char]0x201A + [char]0x201B
+    $quotedDirectory = $directory -replace "([$singleQuoteCharacters])", '$1$1'
     Write-Plain "    [Environment]::GetEnvironmentVariable('Path','User') + ';$quotedDirectory', 'User')"
     Write-Plain ''
     Write-Plain 'Run it, then open a new terminal. This installer does not change'
     Write-Plain 'your PATH on its own. Until then, the full path works:'
-    $quotedDestination = $destination.Replace("'", "''")
+    $quotedDestination = $destination -replace "([$singleQuoteCharacters])", '$1$1'
     Write-Plain "  & '$quotedDestination'"
     Write-Plain 'Paste the setup prompt into your coding agent: https://runinfra.ai/docs/tools-sdks/agent-setup'
+    Write-Plain 'To set it up yourself, run the full path above, or runinfra once your PATH is set.'
 }
 
 try {
