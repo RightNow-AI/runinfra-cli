@@ -170,7 +170,7 @@ function New-HttpsRequest {
 function Get-LocalMirrorUri {
     param([Parameter(Mandatory = $true)][string] $Url)
     $address = $null
-    if ($Url -notmatch '^file:///' -or $Url -match '[\x00-\x1e\x7f\\]' -or
+    if ($Url -notmatch '^file:///' -or $Url -match '[\x00-\x1f\x7f\\]' -or
         -not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref] $address) -or
         -not $address.IsFile -or $address.IsUnc -or -not [string]::IsNullOrEmpty($address.Host) -or
         -not [string]::IsNullOrEmpty($address.UserInfo) -or -not [string]::IsNullOrEmpty($address.Query) -or
