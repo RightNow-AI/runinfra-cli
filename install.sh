@@ -253,6 +253,54 @@ fi
 
 # ------------------------------------------------------- what machine is this
 
+# Always look, even when --target names the build, because the probe further
+# down can only run a binary that was built for this machine. Nothing here
+# refuses: an unsupported host sets host_target empty and the decision about
+# whether that is fatal belongs to the caller.
+uname_s="$(uname -s 2>/dev/null || echo unknown)"
+uname_m="$(uname -m 2>/dev/null || echo unknown)"
+
+case "$uname_s" in
+Linux) host_os=linux ;;
+Darwin) host_os=darwin ;;
+MINGW* | MSYS* | CYGWIN* | Windows_NT) host_os=windows ;;
+*) host_os="" ;;
+esac
+
+case "$uname_m" in
+x86_64 | amd64 | x64) host_arch=x64 ;;
+aarch64 | arm64) host_arch=arm64 ;;
+*) host_arch="" ;;
+esac
+
+# musl is a different C library, not a different flavour of the same one.
+# A glibc binary on Alpine dies with a loader error that reads like a
+# corrupt download, so detect it here and ask for the right file.
+host_libc=""
+if [ "$host_os" = linux ]; then
+	if have ldd; then
+		# No pipeline: musl's ldd exits non-zero even when it answers,
+		# and under pipefail that would swallow the detection.
+		ldd_report="$( (ldd --version) 2>&1 || true)"
+		case "$ldd_report" in
+		*musl*) host_libc="-musl" ;;
+		esac
+	fi
+	if [ -z "$host_libc" ]; then
+		for loader in /lib/ld-musl-*.so.1; do
+			if [ -e "$loader" ]; then host_libc="-musl"; fi
+			break
+		done
+	fi
+fi
+
+host_target=""
+case "$host_os" in
+linux | darwin)
+	if [ -n "$host_arch" ]; then host_target="${host_os}-${host_arch}${host_libc}"; fi
+	;;
+esac
+
 if [ -n "$forced_target" ]; then
 	target="$forced_target"
 	target_supported=no
@@ -265,52 +313,22 @@ if [ -n "$forced_target" ]; then
 	fi
 	detected_as="forced with --target"
 else
-	uname_s="$(uname -s 2>/dev/null || echo unknown)"
-	uname_m="$(uname -m 2>/dev/null || echo unknown)"
-
-	case "$uname_s" in
-	Linux) target_os=linux ;;
-	Darwin) target_os=darwin ;;
-	MINGW* | MSYS* | CYGWIN* | Windows_NT)
+	case "$host_os" in
+	windows)
 		die "this is Windows, and this script installs the Linux and macOS builds." \
 			"Windows has its own installer. In PowerShell, run:" \
 			"irm https://raw.githubusercontent.com/$release_repo/main/install.ps1 | iex"
 		;;
-	*)
+	"")
 		die "unsupported operating system: uname -s reported '$uname_s'." \
 			"There are builds for Linux and macOS only." \
 			"If that report is wrong, force it: --target linux-x64"
 		;;
 	esac
 
-	case "$uname_m" in
-	x86_64 | amd64 | x64) target_arch=x64 ;;
-	aarch64 | arm64) target_arch=arm64 ;;
-	*)
+	if [ -z "$host_arch" ]; then
 		die "unsupported CPU architecture: uname -m reported '$uname_m'." \
 			"There are builds for x86_64 and arm64 only."
-		;;
-	esac
-
-	# musl is a different C library, not a different flavour of the same one.
-	# A glibc binary on Alpine dies with a loader error that reads like a
-	# corrupt download, so detect it here and ask for the right file.
-	target_libc=""
-	if [ "$target_os" = linux ]; then
-		if have ldd; then
-			# No pipeline: musl's ldd exits non-zero even when it answers,
-			# and under pipefail that would swallow the detection.
-			ldd_report="$( (ldd --version) 2>&1 || true)"
-			case "$ldd_report" in
-			*musl*) target_libc="-musl" ;;
-			esac
-		fi
-		if [ -z "$target_libc" ]; then
-			for loader in /lib/ld-musl-*.so.1; do
-				if [ -e "$loader" ]; then target_libc="-musl"; fi
-				break
-			done
-		fi
 	fi
 
 	# The musl build links against libstdc++ and libgcc, which a bare Alpine
@@ -321,7 +339,7 @@ else
 	# them discover it later. This is a note, not a refusal: the file may
 	# already be present under a name we did not look for, and being wrong
 	# here must not stop an install that would have worked.
-	if [ "$target_libc" = "-musl" ]; then
+	if [ "$host_libc" = "-musl" ]; then
 		if ! ls /usr/lib/libstdc++.so.* >/dev/null 2>&1; then
 			say ""
 			say "Note: this looks like a musl system without libstdc++, which the"
@@ -333,7 +351,7 @@ else
 		fi
 	fi
 
-	target="${target_os}-${target_arch}${target_libc}"
+	target="$host_target"
 	detected_as="$uname_s $uname_m"
 fi
 
@@ -1004,10 +1022,19 @@ chmod 755 "$staged_path" || die "could not make ${artifact} executable."
 # will not run once renamed, and an upgrade that swapped a working binary for
 # a broken one would be the worst outcome this script could produce.
 #
+# That only holds when the binary was built for this machine. A build forced
+# with --target for a machine you are not standing on cannot be run here, and
+# an "Exec format error" from it says nothing about the file. So the probe is
+# skipped for that case and only that case, out loud, and everything above
+# this line has already been verified the same way as for a native install.
+#
 # stdin comes from /dev/null on purpose. Under `curl | sh` the shell is
 # reading this script from stdin, so a child that read stdin would eat the
 # rest of the installer.
-if ! installed_version="$("$staged_path" --version 2>&1 </dev/null)"; then
+if [ "$target" != "$host_target" ]; then
+	say "Not run here: ${artifact} was built for ${target}, and this machine is ${host_target:-not one of the published targets}."
+	installed_version="${artifact}${release_tag:+ ${release_tag}}"
+elif ! installed_version="$("$staged_path" --version 2>&1 </dev/null)"; then
 	case "$installed_version" in
 	*GLIBC_*|*GLIBCXX_*|*built\ for\ macOS*|*requires\ macOS*|*Symbol\ not\ found*|*Error\ relocating*)
 		boot_hint="This system is too old or lacks required runtime libraries. GNU Linux needs glibc 2.25 or newer; macOS needs 13.0 or newer. On Alpine, install libstdc++."
